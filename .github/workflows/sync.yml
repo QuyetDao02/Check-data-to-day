@@ -1,23 +1,17 @@
 name: FB CSV Export (Sheet-driven, no GCP)
 
 on:
-  workflow_dispatch: {}
   schedule:
-    - cron: "5 * * * *"   # mỗi giờ (UTC phút 05)
-
-concurrency:
-  group: fb-csv-export
-  cancel-in-progress: true
+    - cron: "0 * * * *"   # chạy mỗi tiếng
+  workflow_dispatch:      # cho phép bấm Run workflow thủ công
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
       - uses: actions/setup-python@v5
         with:
@@ -30,23 +24,21 @@ jobs:
 
       - name: Run exporter (resume mode)
         env:
-          META_TOKEN:      ${{ secrets.META_TOKEN }}  # BẮT BUỘC: GitHub Secrets
-          SHEET_ID:        ${{ vars.SHEET_ID }}       # BẮT BUỘC: repo Variables (ID sheet)
-          API_SHEET_NAME:  ${{ vars.API_SHEET_NAME }} # tuỳ chọn (mặc định "api")
-          API_SHEET_GID:   ${{ vars.API_SHEET_GID }}  # tuỳ chọn (nếu set thì ưu tiên gid)
-          CHUNK_DAYS:      ${{ vars.CHUNK_DAYS }}     # tuỳ chọn
-          TIME_BUDGET_S:   ${{ vars.TIME_BUDGET_S }}  # tuỳ chọn
-          PACE_MS:         ${{ vars.PACE_MS }}        # tuỳ chọn
-          RATE_LIMIT_RETRIES: ${{ vars.RATE_LIMIT_RETRIES }} # tuỳ chọn
+          SHEET_ID: ${{ vars.SHEET_ID }}           # BẮT BUỘC (repo Settings → Variables)
+          API_SHEET_NAME: api                      # nếu dùng theo tên sheet
+          API_SHEET_GID: ${{ vars.API_SHEET_GID }} # nếu set GID thì sẽ ưu tiên GID
+          CHUNK_DAYS: "3"
+          TIME_BUDGET_S: "300"
+          PACE_MS: "800"
+          RATE_LIMIT_RETRIES: "4"
+          # META_TOKEN: ${{ secrets.META_TOKEN }}  # CHỈ dùng nếu bạn KHÔNG điền token ở api!D6
         run: |
           python main.py
 
       - name: Commit CSV & state
         run: |
           git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/latest.csv .state/queue.json || true
-          if ! git diff --cached --quiet; then
-            git commit -m "Update CSV/state [skip ci]"
-            git push
-          fi
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Export CSV & state" || echo "No changes"
+          git push
