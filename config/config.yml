@@ -1,0 +1,17 @@
+since: "2025-09-01"   # yyyy-MM-dd
+until: "2025-09-21"
+
+accounts:             # KHÔNG cần "act_" (script tự thêm)
+  - "1234567890"
+  - "2345678901"
+
+fx:
+  VND: 1
+  USD: 25400
+  THB: 720
+
+# Nâng cao (giữ nguyên nếu không cần)
+chunk_days: 3          # chia lô theo ngày (CHUNK_DAYS)
+time_budget_s: 300     # thời lượng mỗi lượt (tự resume ở lượt sau)
+pace_ms: 800           # ngủ giữa các call (giảm rate limit)
+rate_limit_retries: 4
