@@ -27,10 +27,10 @@ jobs:
           SHEET_ID: ${{ vars.SHEET_ID }}           # BẮT BUỘC (repo Settings → Variables)
           API_SHEET_NAME: api                      # nếu dùng theo tên sheet
           API_SHEET_GID: ${{ vars.API_SHEET_GID }} # nếu set GID thì sẽ ưu tiên GID
-          CHUNK_DAYS: "3"
-          TIME_BUDGET_S: "300"
-          PACE_MS: "800"
-          RATE_LIMIT_RETRIES: "4"
+          # CHUNK_DAYS: "3"
+          # TIME_BUDGET_S: "300"
+          # PACE_MS: "800"
+          # RATE_LIMIT_RETRIES: "4"
           # META_TOKEN: ${{ secrets.META_TOKEN }}  # CHỈ dùng nếu bạn KHÔNG điền token ở api!D6
         run: |
           python main.py
