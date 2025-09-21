@@ -1,15 +1,15 @@
-import os, json, time, math, random, datetime, csv, logging
+import os, io, json, time, math, random, datetime, csv, logging
 from typing import List, Dict
 import requests, yaml, pathlib
 from pathlib import Path
 
 # ========= ĐƯỜNG DẪN =========
-ROOT       = pathlib.Path(__file__).resolve().parent
-CONFIG_PATH= ROOT / "config" / "config.yml"
-STATE_PATH = ROOT / ".state" / "queue.json"
-CSV_PATH   = ROOT / "data" / "latest.csv"
+ROOT        = pathlib.Path(__file__).resolve().parent
+CONFIG_PATH = ROOT / "config" / "config.yml"
+STATE_PATH  = ROOT / ".state" / "queue.json"
+CSV_PATH    = ROOT / "data" / "latest.csv"
 
-# ========= CẤU HÌNH TƯƠNG ỨNG APPS SCRIPT =========
+# ========= CẤU HÌNH GIỐNG APP SCRIPT =========
 FB_API_VERSION = "v20.0"
 HEADERS_VN = [
     "NGÀY BẮT ĐẦU","ID TÀI KHOẢN","TÊN TÀI KHOẢN",
@@ -21,7 +21,7 @@ HEADERS_VN = [
     "LƯỢT HIỂN THỊ (QC)","NGƯỜI TIẾP CẬN (QC)"
 ]
 
-# sẽ override bằng config.yml
+# Tham số nâng cao (có thể override bằng sheet/config.yml)
 CHUNK_DAYS = 3
 TIME_BUDGET_S = 300
 PACE_MS = 800
@@ -32,11 +32,10 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("fb-export")
 _LAST_TS = 0
 
-# ========= CSV LỖI (CÁCH 2) =========
+# ========= CSV LỖI (để Sheets IMPORTDATA thấy ngay) =========
 def emit_error_csv(msg: str):
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
-        # Đơn giản để IMPORTDATA hiển thị rõ lỗi
         f.write("ERROR\n")
         f.write((msg or "").strip() + "\n")
 
@@ -186,14 +185,12 @@ def extract_msg_started(r: dict) -> int:
         "onsite_conversion.messaging_conversation_started_7d",
         "onsite_conversion.messaging_conversation_started_28d"
     ]
-    # exact
     for k in keys:
         nd = k.lower()
         for it in arr:
             if str(it.get("action_type","")).lower() == nd:
                 try: return int(float(it.get("value",0)))
                 except: return 0
-    # contains
     for k in keys:
         nd = k.lower()
         for it in arr:
@@ -302,10 +299,90 @@ def append_csv_rows(rows: List[List]):
         w = csv.writer(f)
         w.writerows(rows)
 
-# ========= LOAD CONFIG + VALIDATION (CÁCH 2) =========
-def load_config_or_fail():
+# ========= ĐỌC GOOGLE SHEET (public viewer) =========
+def to_ymd_any(val: str) -> str:
+    s = (val or "").strip()
+    if not s: return ""
+    s = s.split(" ")[0]
+    if "/" in s:
+        p = s.split("/")
+        if len(p)==3:
+            d, m, y = p[0], p[1], p[2]
+            return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+    return s  # đã là yyyy-MM-dd
+
+def _csv_rows_from_gsheet_csv(sheet_id: str, sheet_name: str=None, gid: str=None, a1_range: str=None):
+    # Ưu tiên export theo gid; nếu không có gid thì dùng gviz theo sheet_name
+    if gid:
+        base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+        if a1_range: base += f"&range={a1_range}"
+    else:
+        base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv"
+        if sheet_name: base += f"&sheet={requests.utils.quote(sheet_name)}"
+        if a1_range:   base += f"&range={a1_range}"
+    r = requests.get(base, timeout=30)
+    r.raise_for_status()
+    return list(csv.reader(io.StringIO(r.text)))
+
+def load_from_sheet_or_fail() -> dict:
+    sheet_id   = os.environ.get("SHEET_ID")  # bắt buộc nếu dùng sheet
+    if not sheet_id:
+        emit_error_csv("Thiếu biến SHEET_ID (repo → Settings → Variables).")
+        raise SystemExit(1)
+
+    sheet_name = os.environ.get("API_SHEET_NAME", "api")
+    sheet_gid  = os.environ.get("API_SHEET_GID")  # optional
+
+    # D2:D4 → since, until, accounts
+    d_vals = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="D2:D4")
+    vals = [ (row[0].strip() if row and len(row)>=1 else "") for row in d_vals ]
+    since_raw  = vals[0] if len(vals)>0 else ""
+    until_raw  = vals[1] if len(vals)>1 else ""
+    accounts_s = vals[2] if len(vals)>2 else ""
+
+    since = to_ymd_any(since_raw)
+    until = to_ymd_any(until_raw)
+
+    if not since or not until or not accounts_s:
+        emit_error_csv("Thiếu cấu hình trong sheet 'api': D2 (since), D3 (until), D4 (ad accounts).")
+        raise SystemExit(1)
+
+    # validate yyyy-MM-dd
+    try: datetime.date.fromisoformat(since)
+    except: emit_error_csv("Sai định dạng 'since' (yyyy-MM-dd hoặc dd/MM/yyyy)"); raise SystemExit(1)
+    try: datetime.date.fromisoformat(until)
+    except: emit_error_csv("Sai định dạng 'until' (yyyy-MM-dd hoặc dd/MM/yyyy)"); raise SystemExit(1)
+
+    accounts = [a.strip() for a in accounts_s.split(",") if a.strip()]
+    if not accounts:
+        emit_error_csv("D4 rỗng: cần danh sách account, phân tách dấu phẩy (KHÔNG cần 'act_').")
+        raise SystemExit(1)
+    accounts = [a if a.startswith("act_") else f"act_{a}" for a in accounts]
+
+    # G2:H → FX map
+    fx_rows = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="G2:H")
+    fx = {}
+    for r in fx_rows:
+        if len(r)>=2 and r[0] and r[1]:
+            try:
+                cur = str(r[0]).strip().upper()
+                rate= float(str(r[1]).strip())
+                if rate>0: fx[cur]=rate
+            except: pass
+    if "VND" not in fx: fx["VND"] = 1.0
+
+    # override nâng cao (nếu có, đặt ở I2:K?) — đơn giản dùng ENV là đủ
+    global CHUNK_DAYS, TIME_BUDGET_S, PACE_MS, RATE_LIMIT_RETRIES
+    CHUNK_DAYS = int(os.environ.get("CHUNK_DAYS", CHUNK_DAYS))
+    TIME_BUDGET_S = int(os.environ.get("TIME_BUDGET_S", TIME_BUDGET_S))
+    PACE_MS = int(os.environ.get("PACE_MS", PACE_MS))
+    RATE_LIMIT_RETRIES = int(os.environ.get("RATE_LIMIT_RETRIES", RATE_LIMIT_RETRIES))
+
+    return {"since": since, "until": until, "accounts": accounts, "fx": fx}
+
+def load_from_config_file_or_fail() -> dict:
     if not CONFIG_PATH.exists():
-        emit_error_csv("Thiếu file config/config.yml trong repo")
+        emit_error_csv("Thiếu SHEET_ID hoặc config/config.yml — cần một trong hai.")
         raise SystemExit(1)
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -313,7 +390,7 @@ def load_config_or_fail():
         emit_error_csv(f"Lỗi đọc config.yml: {e}")
         raise SystemExit(1)
 
-    # bắt buộc: since, until, accounts
+    # bắt buộc
     missing = []
     if not cfg.get("since"):    missing.append("since")
     if not cfg.get("until"):    missing.append("until")
@@ -322,19 +399,19 @@ def load_config_or_fail():
         emit_error_csv("Thiếu cấu hình trong config.yml: " + ", ".join(missing))
         raise SystemExit(1)
 
-    # kiểm tra format yyyy-MM-dd
-    try: datetime.date.fromisoformat(cfg["since"])
-    except: emit_error_csv("Sai định dạng 'since' (yyyy-MM-dd)"); raise SystemExit(1)
-    try: datetime.date.fromisoformat(cfg["until"])
-    except: emit_error_csv("Sai định dạng 'until' (yyyy-MM-dd)"); raise SystemExit(1)
+    since = to_ymd_any(cfg["since"])
+    until = to_ymd_any(cfg["until"])
+    try: datetime.date.fromisoformat(since)
+    except: emit_error_csv("Sai định dạng 'since' trong config.yml"); raise SystemExit(1)
+    try: datetime.date.fromisoformat(until)
+    except: emit_error_csv("Sai định dạng 'until' trong config.yml"); raise SystemExit(1)
 
-    accounts = [str(a).strip() for a in cfg["accounts"]]
+    accounts = [str(a).strip() for a in cfg["accounts"] if str(a).strip()]
     if not accounts:
         emit_error_csv("Danh sách accounts rỗng trong config.yml")
         raise SystemExit(1)
     accounts = [a if a.startswith("act_") else f"act_{a}" for a in accounts]
 
-    # FX
     fx_raw = cfg.get("fx") or {}
     try:
         fx = {str(k).upper(): float(v) for k,v in fx_raw.items()}
@@ -343,29 +420,27 @@ def load_config_or_fail():
         raise SystemExit(1)
     if "VND" not in fx: fx["VND"] = 1.0
 
-    # override tham số nâng cao
     global CHUNK_DAYS, TIME_BUDGET_S, PACE_MS, RATE_LIMIT_RETRIES
     CHUNK_DAYS = int(cfg.get("chunk_days", CHUNK_DAYS))
     TIME_BUDGET_S = int(cfg.get("time_budget_s", TIME_BUDGET_S))
     PACE_MS = int(cfg.get("pace_ms", PACE_MS))
     RATE_LIMIT_RETRIES = int(cfg.get("rate_limit_retries", RATE_LIMIT_RETRIES))
 
-    return {
-        "since": cfg["since"],
-        "until": cfg["until"],
-        "accounts": accounts,
-        "fx": fx
-    }
+    return {"since": since, "until": until, "accounts": accounts, "fx": fx}
+
+def load_config_or_fail() -> dict:
+    # Ưu tiên đọc từ SHEET_ID (sheet 'api'), nếu không có thì fallback config.yml
+    if os.environ.get("SHEET_ID"):
+        return load_from_sheet_or_fail()
+    return load_from_config_file_or_fail()
 
 # ========= MAIN (resume theo TIME_BUDGET_S) =========
 def run_timed():
-    # Lấy token từ secret (bắt buộc)
     meta_token = os.environ.get("META_TOKEN")
     if not meta_token:
         emit_error_csv("Thiếu GitHub Secret META_TOKEN")
         raise SystemExit(1)
 
-    # Đọc & validate config
     cfg = load_config_or_fail()
 
     start = time.time()
@@ -383,16 +458,14 @@ def run_timed():
     while st["queue"] and (time.time()-start) < (TIME_BUDGET_S - 10):
         job = st["queue"].pop(0)
 
-        # Meta & tỷ giá
         meta = fetch_account_meta(job["actId"], meta_token)
         cur  = (meta.get("currency") or "VND").upper()
         rate = 1.0 if cur=="VND" else float(cfg["fx"].get(cur, 0))
         if cur!="VND" and (not rate or rate <= 0):
-            emit_error_csv(f"Thiếu tỷ giá VND cho {cur} trong config.yml")
+            emit_error_csv(f"Thiếu tỷ giá VND cho {cur} (FX ở G:H).")
             raise SystemExit(1)
         divisor = minor_unit_divisor(cur)
 
-        # Budgets & Spend & Insights
         b = fetch_budgets_only(job["actId"], meta_token)
         camp_map, adset_map = build_budget_maps_vnd(b["campaigns"], b["adsets"], rate, divisor)
 
@@ -414,9 +487,7 @@ if __name__ == "__main__":
     try:
         run_timed()
     except SystemExit:
-        # đã emit_error_csv trước đó
         raise
     except Exception as e:
-        # lỗi bất ngờ -> cũng ghi CSV lỗi để Sheet thấy
         emit_error_csv(f"Lỗi không xác định: {e}")
         raise
