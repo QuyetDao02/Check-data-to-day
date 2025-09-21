@@ -20,9 +20,10 @@ HEADERS_VN = [
     "LƯỢT HIỂN THỊ (QC)","NGƯỜI TIẾP CẬN (QC)"
 ]
 
-# Tham số (có thể override bằng ENV; bỏ qua env rỗng)
+# tham số (có thể override qua ENV; bỏ qua env rỗng)
 PACE_MS            = 800
 RATE_LIMIT_RETRIES = 4
+CHUNK_DAYS         = 14      # CHIA NHỎ KHOẢNG NGÀY để tránh timeout
 RATE_LIMIT_ERR     = "RATE_LIMIT"
 
 logging.basicConfig(level=logging.INFO)
@@ -46,9 +47,10 @@ def _env_int(name: str, default: int) -> int:
     except:       return default
 
 def _apply_env_overrides():
-    global PACE_MS, RATE_LIMIT_RETRIES
+    global PACE_MS, RATE_LIMIT_RETRIES, CHUNK_DAYS
     PACE_MS            = _env_int("PACE_MS", PACE_MS)
     RATE_LIMIT_RETRIES = _env_int("RATE_LIMIT_RETRIES", RATE_LIMIT_RETRIES)
+    CHUNK_DAYS         = _env_int("CHUNK_DAYS", CHUNK_DAYS)
 
 def pace():
     global _LAST_TS
@@ -78,12 +80,31 @@ def fmt_pct(val) -> str:
         return ""
 
 def fmt_vnd(x):
-    """Làm tròn đến đồng, trả về int; nếu rỗng thì trả ''."""
     if x in (None, ""): return ""
     try:
         return int(round(float(x)))
     except:
         return ""
+
+def clamp_dates(since: str, until: str) -> tuple[str,str]:
+    """Ép until <= hôm nay; nếu since > until thì hạ since = until."""
+    today = datetime.date.today()
+    s = datetime.date.fromisoformat(since)
+    u = datetime.date.fromisoformat(until)
+    if u > today:
+        u = today
+    if s > u:
+        s = u
+    return s.isoformat(), u.isoformat()
+
+def slice_dates(since: str, until: str, chunk_days: int):
+    s = datetime.date.fromisoformat(since)
+    u = datetime.date.fromisoformat(until)
+    cur = s
+    while cur <= u:
+        end = min(u, cur + datetime.timedelta(days=chunk_days-1))
+        yield cur.isoformat(), end.isoformat()
+        cur = end + datetime.timedelta(days=1)
 
 def minor_unit_divisor(cur: str) -> int:
     return 1 if (cur or "").upper() in ("VND","JPY","KRW") else 100
@@ -107,10 +128,10 @@ def fb_get(url: str, token: str, try_count=0):
         if try_count < RATE_LIMIT_RETRIES:
             time.sleep(backoff); return fb_get(url, token, try_count+1)
         raise RuntimeError(RATE_LIMIT_ERR)
-    if (code == 400 and err and str(err.get("code"))=="17") or code == 429 or code >= 500:
+    if (code == 400 and err and str(err.get("code")) in ("17","100")) or code == 429 or code >= 500:
         if try_count < MAX_TRIES:
             time.sleep(backoff); return fb_get(url, token, try_count+1)
-        raise RuntimeError(f"HTTP {code} after retries: {r.text}")
+        raise RuntimeError(f"HTTP {code}: {r.text}")
     raise RuntimeError(f"HTTP {code}: {r.text}")
 
 def fb_paged(url_no_token: str, token: str) -> List[dict]:
@@ -170,7 +191,6 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
         "impressions","reach","spend","clicks","inline_link_clicks",
         "cpm","cpc","ctr","actions","cost_per_action_type"
     ])
-    # v20: bỏ action_report_time, dùng unified attribution
     params = {
         "level":"ad","fields":fields,"limit":"500",
         "time_range": json.dumps({"since":since,"until":until}),
@@ -251,20 +271,15 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
         impr      = to_num(r.get("impressions"))
         link      = to_num(r.get("inline_link_clicks"))
 
-        cpc_api  = r.get("cpc")   # đơn vị tiền gốc
+        cpc_api  = r.get("cpc")
         cpm_api  = r.get("cpm")
-        ctr_api  = r.get("ctr")   # %
+        ctr_api  = r.get("ctr")
 
-        # CPC click (ưu tiên API; fallback = spend/link)
         cpc_click_raw = (to_num(cpc_api) * rate) if (cpc_api not in (None,"")) else ((to_num(spend_vnd)/link) if link>0 else "")
         cpc_click_vnd = fmt_vnd(cpc_click_raw)
-
-        # CPC tất cả (spend/click)
         cpc_all_vnd   = fmt_vnd((to_num(spend_vnd)/clicks) if clicks>0 else "")
-
-        # CPM (ưu tiên API; fallback = spend/impr*1000)
-        cpm_raw  = (to_num(cpm_api)*rate) if (cpm_api not in (None,"")) else (((to_num(spend_vnd)/impr)*1000.0) if impr>0 else "")
-        cpm_vnd  = fmt_vnd(cpm_raw)
+        cpm_raw       = (to_num(cpm_api)*rate) if (cpm_api not in (None,"")) else (((to_num(spend_vnd)/impr)*1000.0) if impr>0 else "")
+        cpm_vnd       = fmt_vnd(cpm_raw)
 
         ctr_all_pct   = to_num(ctr_api) if (ctr_api not in (None,"")) else (pct2(clicks, impr) or "")
         ctr_click_pct = pct2(link, impr) or ""
@@ -297,7 +312,7 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
         ])
     return out
 
-# ========= ĐỌC GOOGLE SHEET =========
+# ========= ĐỌC GOOGLE SHEET / CONFIG =========
 def to_ymd_any(val: str) -> str:
     s = (val or "").strip()
     if not s: return ""
@@ -346,13 +361,15 @@ def load_from_sheet_or_fail() -> dict:
     try: datetime.date.fromisoformat(until)
     except: emit_error_csv("Sai định dạng 'until'"); raise SystemExit(1)
 
+    # clamp ngày để tránh lỗi 400 nếu until ở tương lai
+    since, until = clamp_dates(since, until)
+
     accounts = [a.strip() for a in accounts_s.split(",") if a.strip()]
     if not accounts:
         emit_error_csv("D4 rỗng: cần danh sách account (không cần 'act_').")
         raise SystemExit(1)
     accounts = [a if a.startswith("act_") else f"act_{a}" for a in accounts]
 
-    # D6: token (optional – ưu tiên ENV)
     token = ""
     try:
         token_rows = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="D6:D6")
@@ -360,7 +377,6 @@ def load_from_sheet_or_fail() -> dict:
     except Exception:
         token = ""
 
-    # G:H: FX
     fx_rows = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="G2:H")
     fx = {}
     for r in fx_rows:
@@ -400,6 +416,8 @@ def load_from_config_file_or_fail() -> dict:
     try: datetime.date.fromisoformat(until)
     except: emit_error_csv("Sai 'until' trong config.yml"); raise SystemExit(1)
 
+    since, until = clamp_dates(since, until)
+
     accounts = [str(a).strip() for a in cfg["accounts"] if str(a).strip()]
     if not accounts:
         emit_error_csv("Danh sách accounts rỗng trong config.yml")
@@ -423,7 +441,7 @@ def load_config_or_fail() -> dict:
         return load_from_sheet_or_fail()
     return load_from_config_file_or_fail()
 
-# ========= MAIN (CHẠY 1 PHÁT) =========
+# ========= MAIN (chạy 1 phát, chunk theo CHUNK_DAYS) =========
 def write_full_csv(rows: List[List]):
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
@@ -452,11 +470,12 @@ def run_once():
         budgets = fetch_budgets_only(act, token)
         camp_map, adset_map = build_budget_maps_vnd(budgets["campaigns"], budgets["adsets"], rate, divisor)
 
-        adset_spend = fetch_adset_spend_map_vnd(act, cfg["since"], cfg["until"], rate, token)
-        ads = fetch_insights_ad(act, cfg["since"], cfg["until"], token)
-
-        rows = map_rows(ads, adset_map, camp_map, adset_spend, meta["name"], rate)
-        all_rows.extend(rows)
+        # CHUNK theo ngày để tránh timeout/invalid parameter
+        for s,u in slice_dates(cfg["since"], cfg["until"], CHUNK_DAYS):
+            adset_spend = fetch_adset_spend_map_vnd(act, s, u, rate, token)
+            ads = fetch_insights_ad(act, s, u, token)
+            rows = map_rows(ads, adset_map, camp_map, adset_spend, meta["name"], rate)
+            all_rows.extend(rows)
 
     write_full_csv(all_rows)
     print(json.dumps({"status":"done","rows":len(all_rows)}, ensure_ascii=False))
