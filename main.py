@@ -341,12 +341,13 @@ def load_from_sheet_or_fail() -> dict:
         raise SystemExit(1)
     accounts = [a if a.startswith("act_") else f"act_{a}" for a in accounts]
 
-    # D6 → token
-    token_rows = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="D6:D6")
-    token = token_rows[0][0].strip() if token_rows and token_rows[0] else ""
-    if not token:
-        emit_error_csv("Thiếu token ở 'api'!D6.")
-        raise SystemExit(1)
+    # D6 → token (KHÔNG BẮT BUỘC NỮA). Có thì lấy, không có thì để rỗng — sẽ ưu tiên ENV.
+    token = ""
+    try:
+        token_rows = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="D6:D6")
+        token = token_rows[0][0].strip() if token_rows and token_rows[0] else ""
+    except Exception:
+        token = ""
 
     # G:H → FX map
     fx_rows = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="G2:H")
@@ -377,7 +378,7 @@ def load_from_config_file_or_fail() -> dict:
     if not cfg.get("since"):    missing.append("since")
     if not cfg.get("until"):    missing.append("until")
     if not cfg.get("accounts"): missing.append("accounts")
-    if not cfg.get("token"):    missing.append("token")
+    # token có thể bỏ qua nếu đã set ENV META_TOKEN
     if missing:
         emit_error_csv("Thiếu cấu hình trong config.yml: " + ", ".join(missing))
         raise SystemExit(1)
@@ -403,8 +404,9 @@ def load_from_config_file_or_fail() -> dict:
         raise SystemExit(1)
     if "VND" not in fx: fx["VND"] = 1.0
 
+    token = str(cfg.get("token","")).strip()
     _apply_env_overrides()
-    return {"since": since, "until": until, "accounts": accounts, "fx": fx, "token": str(cfg["token"]).strip()}
+    return {"since": since, "until": until, "accounts": accounts, "fx": fx, "token": token}
 
 def load_config_or_fail() -> dict:
     # Ưu tiên đọc từ SHEET_ID (sheet 'api'), nếu không có thì fallback config.yml
@@ -423,7 +425,11 @@ def write_full_csv(rows: List[List]):
 
 def run_once():
     cfg = load_config_or_fail()
-    token = cfg["token"]
+    # ✅ Ưu tiên ENV META_TOKEN; nếu không có thì thử từ cfg (sheet/config)
+    token = os.environ.get("META_TOKEN") or cfg.get("token","")
+    if not token:
+        emit_error_csv("Thiếu token: set ENV META_TOKEN (Actions Secret) hoặc cấu hình trong file.")
+        raise SystemExit(1)
 
     all_rows: List[List] = []
     for act in cfg["accounts"]:
