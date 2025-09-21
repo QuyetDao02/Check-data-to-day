@@ -361,7 +361,7 @@ def load_from_sheet_or_fail() -> dict:
         emit_error_csv("Thiếu biến SHEET_ID (repo → Settings → Secrets and variables → Actions).")
         raise SystemExit(1)
 
-    sheet_name = os.environ.get("API_SHEET_NAME", "api")
+    sheet_name = os.environ.get("API_SHEET_NAME")
     sheet_gid  = os.environ.get("API_SHEET_GID")
 
     d_vals = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="D2:D4")
