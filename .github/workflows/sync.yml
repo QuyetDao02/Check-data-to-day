@@ -1,0 +1,46 @@
+name: FB Sheets Sync
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Mỗi giờ vào phút thứ 5 (tránh xung đột đầu giờ). GitHub Actions dùng UTC.
+    - cron: "5 * * * *"
+
+concurrency:
+  group: fb-sheets-sync
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Timed batch run (resume mode)
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          FB_API_VERSION: v20.0
+          SHEET_DATA_NAME: Data
+          STATE_TAB: _state
+          STATE_KEY: DATA_JOB_QUEUE_VND
+          TIME_INCREMENT: "1"
+          CHUNK_DAYS: "3"
+          TIME_BUDGET_S: "300"
+          PACE_MS: "800"
+          RATE_LIMIT_RETRIES: "4"
+          MODE: timed
+        run: |
+          python main.py
