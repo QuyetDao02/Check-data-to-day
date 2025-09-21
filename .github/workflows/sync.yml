@@ -1,13 +1,44 @@
 name: FB CSV Export (no GCP)
 
+# Tên hiển thị của mỗi run — chèn correlation_id để Google Sheet nhận diện
+run-name: FB CSV Export (${{ inputs.correlation_id || 'scheduled' }})
+
 on:
   workflow_dispatch:
+    inputs:
+      sheet_id:
+        description: "Google Sheet ID"
+        required: true
+      api_sheet_name:
+        description: "Sheet name for config (default: api)"
+        required: false
+        default: "api"
+      api_sheet_gid:
+        description: "Optional GID of 'api' sheet (leave blank if not used)"
+        required: false
+        default: ""
+      correlation_id:
+        description: "Unique id from Google Sheets"
+        required: true
   schedule:
     - cron: "0 * * * *"  # chạy mỗi giờ
+
+permissions:
+  contents: write
+  actions: read
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
+    # Env cho cả 2 chế độ:
+    # - Khi bấm nút (workflow_dispatch): dùng inputs.*
+    # - Khi chạy theo lịch: dùng fallback cứng ở dưới (hãy thay sheet id/gid mặc định của bạn)
+    env:
+      SHEET_ID:       ${{ inputs.sheet_id       || '1jkdkGG2A8JS2GE728CwvkeVRFNXG7-28TN9GbXo1SYY' }}
+      API_SHEET_NAME: ${{ inputs.api_sheet_name || 'api' }}
+      API_SHEET_GID:  ${{ inputs.api_sheet_gid  || '1875921302' }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -20,17 +51,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run exporter (resume mode)
-        env:
-          SHEET_ID: 1jkdkGG2A8JS2GE728CwvkeVRFNXG7-28TN9GbXo1SYY
-          API_SHEET_NAME: api
-          API_SHEET_GID: "1875921302"   # đổi đúng gid của sheet 'api' nếu cần
+      - name: Run exporter
         run: python main.py
 
-      - name: Commit CSV & state
+      - name: Commit CSV
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/latest.csv .state/queue.json || true
-          git commit -m "update csv/state" || echo "no changes"
-          git push || echo "no changes to push"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/latest.csv || true
+          git commit -m "Update CSV (${{ inputs.correlation_id || github.run_id }})" || echo "No changes"
+          git push || echo "No changes to push"
