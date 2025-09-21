@@ -1,15 +1,13 @@
-name: FB CSV Export (Sheet-driven, no GCP)
+name: FB CSV Export (no GCP)
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "0 * * * *"   # chạy mỗi tiếng
-  workflow_dispatch:      # cho phép bấm Run workflow thủ công
+    - cron: "0 * * * *"  # chạy mỗi giờ
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -24,21 +22,15 @@ jobs:
 
       - name: Run exporter (resume mode)
         env:
-          SHEET_ID: ${{ vars.SHEET_ID }}           # BẮT BUỘC (repo Settings → Variables)
-          API_SHEET_NAME: api                      # nếu dùng theo tên sheet
-          API_SHEET_GID: ${{ vars.API_SHEET_GID }} # nếu set GID thì sẽ ưu tiên GID
-          # CHUNK_DAYS: "3"
-          # TIME_BUDGET_S: "300"
-          # PACE_MS: "800"
-          # RATE_LIMIT_RETRIES: "4"
-          # META_TOKEN: ${{ secrets.META_TOKEN }}  # CHỈ dùng nếu bạn KHÔNG điền token ở api!D6
-        run: |
-          python main.py
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          API_SHEET_NAME: api
+          API_SHEET_GID: "1875921302"   # đổi đúng gid của sheet 'api' nếu cần
+        run: python main.py
 
       - name: Commit CSV & state
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git commit -m "Export CSV & state" || echo "No changes"
-          git push
+          git add data/latest.csv .state/queue.json || true
+          git commit -m "update csv/state" || echo "no changes"
+          git push || echo "no changes to push"
