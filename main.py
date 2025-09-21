@@ -1,4 +1,3 @@
-# main.py
 import os, io, json, time, math, random, datetime, csv, logging
 from typing import List, Dict
 import requests, yaml, pathlib
@@ -10,7 +9,7 @@ CONFIG_PATH = ROOT / "config" / "config.yml"
 STATE_PATH  = ROOT / ".state" / "queue.json"
 CSV_PATH    = ROOT / "data" / "latest.csv"
 
-# ========= CẤU HÌNH GIỐNG APP SCRIPT =========
+# ========= CẤU HÌNH =========
 FB_API_VERSION = "v20.0"
 HEADERS_VN = [
     "NGÀY BẮT ĐẦU","ID TÀI KHOẢN","TÊN TÀI KHOẢN",
@@ -22,7 +21,7 @@ HEADERS_VN = [
     "LƯỢT HIỂN THỊ (QC)","NGƯỜI TIẾP CẬN (QC)"
 ]
 
-# Tham số nâng cao (có thể override bằng ENV hoặc config.yml)
+# Tham số nâng cao (override được bằng ENV / config.yml)
 CHUNK_DAYS = 3
 TIME_BUDGET_S = 300
 PACE_MS = 800
@@ -33,7 +32,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("fb-export")
 _LAST_TS = 0
 
-# ========= CSV LỖI (để Sheets IMPORTDATA thấy ngay) =========
+# ========= CSV LỖI (IMPORTDATA thấy ngay) =========
 def emit_error_csv(msg: str):
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
@@ -79,10 +78,12 @@ def fb_get(url: str, token: str, try_count=0):
     err = None
     try: err = r.json().get("error")
     except: pass
+    # 403 (transient) / code 4: retry nhẹ
     if code == 403 and err and (err.get("code")==4 or err.get("is_transient") is True):
         if try_count < RATE_LIMIT_RETRIES:
             time.sleep(backoff); return fb_get(url, token, try_count+1)
         raise RuntimeError(RATE_LIMIT_ERR)
+    # 400(code17)/429/5xx: backoff nhiều
     if (code == 400 and err and str(err.get("code"))=="17") or code == 429 or code >= 500:
         if try_count < MAX_TRIES:
             time.sleep(backoff); return fb_get(url, token, try_count+1)
@@ -313,7 +314,6 @@ def to_ymd_any(val: str) -> str:
     return s  # đã là yyyy-MM-dd
 
 def _csv_rows_from_gsheet_csv(sheet_id: str, sheet_name: str=None, gid: str=None, a1_range: str=None):
-    # Ưu tiên export theo gid; nếu không có gid thì dùng gviz theo sheet_name
     if gid:
         base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
         if a1_range: base += f"&range={a1_range}"
@@ -325,18 +325,8 @@ def _csv_rows_from_gsheet_csv(sheet_id: str, sheet_name: str=None, gid: str=None
     r.raise_for_status()
     return list(csv.reader(io.StringIO(r.text)))
 
-def load_token_from_sheet(sheet_id: str, sheet_name: str = "api", gid: str = None) -> str:
-    """Đọc token ở ô api!D6 (1 ô) qua CSV export."""
-    rows = _csv_rows_from_gsheet_csv(
-        sheet_id,
-        sheet_name=sheet_name,
-        gid=gid,
-        a1_range="D6:D6"
-    )
-    return (rows[0][0].strip() if rows and rows[0] and len(rows[0]) >= 1 else "")
-
 def load_from_sheet_or_fail() -> dict:
-    sheet_id   = os.environ.get("SHEET_ID")  # bắt buộc nếu dùng sheet
+    sheet_id   = os.environ.get("SHEET_ID")  # bắt buộc
     if not sheet_id:
         emit_error_csv("Thiếu biến SHEET_ID (repo → Settings → Variables).")
         raise SystemExit(1)
@@ -344,12 +334,13 @@ def load_from_sheet_or_fail() -> dict:
     sheet_name = os.environ.get("API_SHEET_NAME", "api")
     sheet_gid  = os.environ.get("API_SHEET_GID")  # optional
 
-    # D2:D4 → since, until, accounts
-    d_vals = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="D2:D4")
-    vals = [ (row[0].strip() if row and len(row)>=1 else "") for row in d_vals ]
-    since_raw  = vals[0] if len(vals)>0 else ""
-    until_raw  = vals[1] if len(vals)>1 else ""
-    accounts_s = vals[2] if len(vals)>2 else ""
+    # D2:D6 → since, until, accounts, (D5 bỏ qua), token(D6)
+    d_vals = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="D2:D6")
+    cells = [ (row[0].strip() if row and len(row)>=1 else "") for row in d_vals ]
+    since_raw  = cells[0] if len(cells)>0 else ""
+    until_raw  = cells[1] if len(cells)>1 else ""
+    accounts_s = cells[2] if len(cells)>2 else ""
+    meta_token = cells[4] if len(cells)>4 else ""  # D6
 
     since = to_ymd_any(since_raw)
     until = to_ymd_any(until_raw)
@@ -358,7 +349,7 @@ def load_from_sheet_or_fail() -> dict:
         emit_error_csv("Thiếu cấu hình trong sheet 'api': D2 (since), D3 (until), D4 (ad accounts).")
         raise SystemExit(1)
 
-    # validate yyyy-MM-dd
+    # validate ngày
     try: datetime.date.fromisoformat(since)
     except: emit_error_csv("Sai định dạng 'since' (yyyy-MM-dd hoặc dd/MM/yyyy)"); raise SystemExit(1)
     try: datetime.date.fromisoformat(until)
@@ -382,14 +373,21 @@ def load_from_sheet_or_fail() -> dict:
             except: pass
     if "VND" not in fx: fx["VND"] = 1.0
 
-    # override nâng cao (nếu có)
+    # override nâng cao (ENV)
     global CHUNK_DAYS, TIME_BUDGET_S, PACE_MS, RATE_LIMIT_RETRIES
     CHUNK_DAYS = int(os.environ.get("CHUNK_DAYS", CHUNK_DAYS))
     TIME_BUDGET_S = int(os.environ.get("TIME_BUDGET_S", TIME_BUDGET_S))
     PACE_MS = int(os.environ.get("PACE_MS", PACE_MS))
     RATE_LIMIT_RETRIES = int(os.environ.get("RATE_LIMIT_RETRIES", RATE_LIMIT_RETRIES))
 
-    return {"since": since, "until": until, "accounts": accounts, "fx": fx}
+    # token: ưu tiên D6; nếu D6 trống thì fallback META_TOKEN (secret)
+    if not meta_token:
+        meta_token = os.environ.get("META_TOKEN","")
+    if not meta_token:
+        emit_error_csv("Thiếu token: điền ở 'api'!D6 hoặc đặt secret META_TOKEN.")
+        raise SystemExit(1)
+
+    return {"since": since, "until": until, "accounts": accounts, "fx": fx, "token": meta_token}
 
 def load_from_config_file_or_fail() -> dict:
     if not CONFIG_PATH.exists():
@@ -401,11 +399,11 @@ def load_from_config_file_or_fail() -> dict:
         emit_error_csv(f"Lỗi đọc config.yml: {e}")
         raise SystemExit(1)
 
-    # bắt buộc
     missing = []
     if not cfg.get("since"):    missing.append("since")
     if not cfg.get("until"):    missing.append("until")
     if not cfg.get("accounts"): missing.append("accounts")
+    if not cfg.get("token"):    missing.append("token")
     if missing:
         emit_error_csv("Thiếu cấu hình trong config.yml: " + ", ".join(missing))
         raise SystemExit(1)
@@ -437,33 +435,20 @@ def load_from_config_file_or_fail() -> dict:
     PACE_MS = int(cfg.get("pace_ms", PACE_MS))
     RATE_LIMIT_RETRIES = int(cfg.get("rate_limit_retries", RATE_LIMIT_RETRIES))
 
-    return {"since": since, "until": until, "accounts": accounts, "fx": fx}
+    return {"since": since, "until": until, "accounts": accounts, "fx": fx, "token": str(cfg["token"])}
 
 def load_config_or_fail() -> dict:
     # Ưu tiên đọc từ SHEET_ID (sheet 'api'), nếu không có thì fallback config.yml
     if os.environ.get("SHEET_ID"):
+        log.info("Config: loaded from Sheet")
         return load_from_sheet_or_fail()
+    log.info("Config: loaded from config/config.yml")
     return load_from_config_file_or_fail()
 
 # ========= MAIN (resume theo TIME_BUDGET_S) =========
 def run_timed():
-    # ƯU TIÊN LẤY TOKEN Ở api!D6; nếu trống thì dùng META_TOKEN (GitHub Secret)
-    sheet_id   = os.environ.get("SHEET_ID")
-    sheet_name = os.environ.get("API_SHEET_NAME", "api")
-    sheet_gid  = os.environ.get("API_SHEET_GID")
-
-    meta_token = ""
-    if sheet_id:
-        meta_token = load_token_from_sheet(sheet_id, sheet_name, sheet_gid).strip()
-
-    if not meta_token:
-        meta_token = (os.environ.get("META_TOKEN") or "").strip()
-
-    if not meta_token:
-        emit_error_csv("Thiếu token: điền ở 'api'!D6 hoặc tạo Secret META_TOKEN trong repo.")
-        raise SystemExit(1)
-
     cfg = load_config_or_fail()
+    meta_token = cfg["token"]
 
     start = time.time()
     st = read_state()
