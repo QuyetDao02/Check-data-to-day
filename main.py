@@ -81,6 +81,22 @@ def fmt_pct(val) -> str:
 def minor_unit_divisor(cur: str) -> int:
     return 1 if (cur or "").upper() in ("VND","JPY","KRW") else 100
 
+def vnd0(x):
+    """Số tiền VND không lẻ (int)."""
+    if x in (None, ""): return ""
+    try:
+        return int(round(float(x)))
+    except:
+        return ""
+
+def vnd2(x):
+    """Số tiền VND 2 chữ số thập phân (cho CPC/CPM/cost-per)."""
+    if x in (None, ""): return ""
+    try:
+        return round(float(x), 2)
+    except:
+        return ""
+
 def with_token(url: str, token: str) -> str:
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}access_token={requests.utils.quote(token)}"
@@ -183,14 +199,19 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
 def build_budget_maps_vnd(camps, sets, rate, divisor):
     camp_map = {}
     for c in camps or []:
-        daily = (float(c["daily_budget"])/divisor)*rate if c.get("daily_budget") else ""
-        life  = (float(c["lifetime_budget"])/divisor)*rate if c.get("lifetime_budget") else ""
-        camp_map[c["id"]] = {"daily": daily, "lifetime": life}
+        daily_vnd = ((float(c["daily_budget"]) / divisor) * rate) if c.get("daily_budget") else ""
+        life_vnd  = ((float(c["lifetime_budget"]) / divisor) * rate) if c.get("lifetime_budget") else ""
+        camp_map[c["id"]] = {"daily": vnd0(daily_vnd), "lifetime": vnd0(life_vnd)}
+
     adset_map = {}
     for s in sets or []:
-        daily = (float(s["daily_budget"])/divisor)*rate if s.get("daily_budget") else ""
-        life  = (float(s["lifetime_budget"])/divisor)*rate if s.get("lifetime_budget") else ""
-        adset_map[s["id"]] = {"daily": daily, "lifetime": life, "campaign_id": s.get("campaign_id")}
+        daily_vnd = ((float(s["daily_budget"]) / divisor) * rate) if s.get("daily_budget") else ""
+        life_vnd  = ((float(s["lifetime_budget"]) / divisor) * rate) if s.get("lifetime_budget") else ""
+        adset_map[s["id"]] = {
+            "daily": vnd0(daily_vnd),
+            "lifetime": vnd0(life_vnd),
+            "campaign_id": s.get("campaign_id")
+        }
     return camp_map, adset_map
 
 def extract_msg_started(r: dict) -> int:
@@ -237,46 +258,52 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
         key = f"{r.get('adset_id','')}|{r.get('date_start','')}"
         adset_spend_vnd = adset_spend_map.get(key, "")
 
+        # Gốc → VND
         spend_vnd = to_num(r.get("spend")) * rate
         clicks    = to_num(r.get("clicks"))
         impr      = to_num(r.get("impressions"))
         link      = to_num(r.get("inline_link_clicks"))
 
-        cpc_api  = r.get("cpc")  # đã là đơn vị tiền gốc
+        cpc_api  = r.get("cpc")   # đơn vị tiền gốc
         cpm_api  = r.get("cpm")
-        ctr_api  = r.get("ctr")  # đã là %
+        ctr_api  = r.get("ctr")   # %
 
+        # CPC/CPM quy về VND
         cpc_click_vnd = (to_num(cpc_api)*rate) if (cpc_api not in (None,"")) else ((spend_vnd/link) if link>0 else "")
         cpc_all_vnd   = (spend_vnd/clicks) if clicks>0 else ""
+        cpm_vnd       = (to_num(cpm_api)*rate) if (cpm_api not in (None,"")) else (((spend_vnd/impr)*1000.0) if impr>0 else "")
 
+        # CTR
         ctr_all_pct   = to_num(ctr_api) if (ctr_api not in (None,"")) else (pct2(clicks, impr) or "")
         ctr_click_pct = pct2(link, impr) or ""
 
-        cpm_vnd       = (to_num(cpm_api)*rate) if (cpm_api not in (None,"")) else (((spend_vnd/impr)*1000.0) if impr>0 else "")
-
+        # Messages
         msg = extract_msg_started(r)
         cost_per_msg = pick_cost_per_action(r, "messaging_conversation_started")
         cost_per_msg_vnd = (to_num(cost_per_msg)*rate) if cost_per_msg!="" else ((spend_vnd/msg) if msg>0 else "")
+
+        # Lấy daily budget theo campaign của adset (nếu có), fallback campaign trên row
+        campaign_daily_vnd = camp_map.get(s.get("campaign_id",""),{}).get("daily","") if s.get("campaign_id") else c.get("daily","")
 
         out.append([
             r.get("date_start",""),
             r.get("account_id",""),
             account_name or "",
             r.get("campaign_name",""),
-            camp_map.get(s.get("campaign_id",""),{}).get("daily","") if s.get("campaign_id") else c.get("daily",""),
+            vnd0(campaign_daily_vnd),     # NGÂN SÁCH CHIẾN DỊCH (VND)
             r.get("adset_name",""),
-            s.get("daily",""),
-            adset_spend_vnd or "",
+            vnd0(s.get("daily","")),      # NGÂN SÁCH NHÓM QUẢNG CÁO (VND)
+            vnd0(adset_spend_vnd),        # CHI TIÊU NHÓM QUẢNG CÁO (VND)
             r.get("ad_name",""),
             msg or "",
             msg or "",
-            cost_per_msg_vnd or "",
-            spend_vnd or "",
-            cpc_click_vnd or "",
-            cpc_all_vnd or "",
-            fmt_pct(ctr_click_pct),
-            fmt_pct(ctr_all_pct),
-            cpm_vnd or "",
+            vnd2(cost_per_msg_vnd),       # CHI PHÍ/MỖI KẾT QUẢ (VND) → 2 lẻ
+            vnd0(spend_vnd),              # CHI TIÊU QUẢNG CÁO (VND)
+            vnd2(cpc_click_vnd),          # CPC CLICK (QC) (VND) → 2 lẻ
+            vnd2(cpc_all_vnd),            # CPC TẤT CẢ (QC) (VND) → 2 lẻ
+            fmt_pct(ctr_click_pct),       # CTR CLICK (QC) (%)
+            fmt_pct(ctr_all_pct),         # CTR TẤT CẢ (QC) (%)
+            vnd2(cpm_vnd),                # CPM (QC) (VND) → 2 lẻ
             impr or "",
             r.get("reach","") or ""
         ])
@@ -341,7 +368,7 @@ def load_from_sheet_or_fail() -> dict:
         raise SystemExit(1)
     accounts = [a if a.startswith("act_") else f"act_{a}" for a in accounts]
 
-    # D6 → token (KHÔNG BẮT BUỘC NỮA). Có thì lấy, không có thì để rỗng — sẽ ưu tiên ENV.
+    # D6 → token (KHÔNG BẮT BUỘC). Có thì lấy; nếu trống sẽ ưu tiên ENV META_TOKEN/config.yml
     token = ""
     try:
         token_rows = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="D6:D6")
@@ -425,10 +452,10 @@ def write_full_csv(rows: List[List]):
 
 def run_once():
     cfg = load_config_or_fail()
-    # ✅ Ưu tiên ENV META_TOKEN; nếu không có thì thử từ cfg (sheet/config)
+    # ✅ Ưu tiên ENV META_TOKEN; nếu không có thì thử token từ sheet/config
     token = os.environ.get("META_TOKEN") or cfg.get("token","")
     if not token:
-        emit_error_csv("Thiếu token: set ENV META_TOKEN (Actions Secret) hoặc cấu hình trong file.")
+        emit_error_csv("Thiếu token: set ENV META_TOKEN (Actions Secret) hoặc điền ở sheet/config.")
         raise SystemExit(1)
 
     all_rows: List[List] = []
@@ -452,7 +479,7 @@ def run_once():
         # 3) Ad insights theo ngày
         ads = fetch_insights_ad(act, cfg["since"], cfg["until"], token)
 
-        # 4) Map rows (đã chuyển CTR thành 'xx.xx%')
+        # 4) Map rows (đã chuyển CTR thành 'xx.xx%' và mọi tiền tệ về VND)
         rows = map_rows(ads, adset_map, camp_map, adset_spend, meta["name"], rate)
         all_rows.extend(rows)
 
