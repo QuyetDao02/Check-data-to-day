@@ -6,7 +6,6 @@ from pathlib import Path
 # ========= ĐƯỜNG DẪN =========
 ROOT        = pathlib.Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "config.yml"
-STATE_PATH  = ROOT / ".state" / "queue.json"
 CSV_PATH    = ROOT / "data" / "latest.csv"
 
 # ========= CẤU HÌNH GIỐNG APP SCRIPT =========
@@ -21,9 +20,7 @@ HEADERS_VN = [
     "LƯỢT HIỂN THỊ (QC)","NGƯỜI TIẾP CẬN (QC)"
 ]
 
-# Tham số mặc định (có thể override bằng ENV; code sẽ bỏ qua env rỗng)
-CHUNK_DAYS         = 3
-TIME_BUDGET_S      = 300
+# Tham số mặc định (có thể override bằng ENV; bỏ qua env rỗng)
 PACE_MS            = 800
 RATE_LIMIT_RETRIES = 4
 RATE_LIMIT_ERR     = "RATE_LIMIT"
@@ -41,22 +38,15 @@ def emit_error_csv(msg: str):
 
 # ========= TIỆN ÍCH =========
 def _env_int(name: str, default: int) -> int:
-    """Trả về int từ ENV; nếu thiếu hoặc chuỗi rỗng hoặc sai định dạng -> default."""
     v = os.environ.get(name)
-    if v is None:
-        return default
+    if v is None: return default
     s = str(v).strip()
-    if s == "":
-        return default
-    try:
-        return int(float(s))
-    except Exception:
-        return default
+    if s == "":   return default
+    try:          return int(float(s))
+    except:       return default
 
 def _apply_env_overrides():
-    global CHUNK_DAYS, TIME_BUDGET_S, PACE_MS, RATE_LIMIT_RETRIES
-    CHUNK_DAYS         = _env_int("CHUNK_DAYS", CHUNK_DAYS)
-    TIME_BUDGET_S      = _env_int("TIME_BUDGET_S", TIME_BUDGET_S)
+    global PACE_MS, RATE_LIMIT_RETRIES
     PACE_MS            = _env_int("PACE_MS", PACE_MS)
     RATE_LIMIT_RETRIES = _env_int("RATE_LIMIT_RETRIES", RATE_LIMIT_RETRIES)
 
@@ -78,7 +68,15 @@ def to_num(v):
 
 def pct2(a, b):
     n, d = to_num(a), to_num(b)
-    return "" if d <= 0 else round((n/d)*100, 2)
+    return None if d <= 0 else (n/d)*100.0
+
+def fmt_pct(val) -> str:
+    """Định dạng phần trăm có dấu % (2 chữ số thập phân)."""
+    if val is None or val == "": return ""
+    try:
+        return f"{round(float(val), 2)}%"
+    except:
+        return ""
 
 def minor_unit_divisor(cur: str) -> int:
     return 1 if (cur or "").upper() in ("VND","JPY","KRW") else 100
@@ -244,14 +242,16 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
         impr      = to_num(r.get("impressions"))
         link      = to_num(r.get("inline_link_clicks"))
 
-        cpc_api  = r.get("cpc")
+        cpc_api  = r.get("cpc")  # đã là đơn vị tiền gốc
         cpm_api  = r.get("cpm")
-        ctr_api  = r.get("ctr")
+        ctr_api  = r.get("ctr")  # đã là %
 
         cpc_click_vnd = (to_num(cpc_api)*rate) if (cpc_api not in (None,"")) else ((spend_vnd/link) if link>0 else "")
         cpc_all_vnd   = (spend_vnd/clicks) if clicks>0 else ""
-        ctr_all_pct   = (to_num(ctr_api)) if (ctr_api not in (None,"")) else (pct2(clicks, impr))
-        ctr_click_pct = pct2(link, impr)
+
+        ctr_all_pct   = to_num(ctr_api) if (ctr_api not in (None,"")) else (pct2(clicks, impr) or "")
+        ctr_click_pct = pct2(link, impr) or ""
+
         cpm_vnd       = (to_num(cpm_api)*rate) if (cpm_api not in (None,"")) else (((spend_vnd/impr)*1000.0) if impr>0 else "")
 
         msg = extract_msg_started(r)
@@ -274,50 +274,13 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
             spend_vnd or "",
             cpc_click_vnd or "",
             cpc_all_vnd or "",
-            ctr_click_pct or "",
-            ctr_all_pct or "",
+            fmt_pct(ctr_click_pct),
+            fmt_pct(ctr_all_pct),
             cpm_vnd or "",
             impr or "",
             r.get("reach","") or ""
         ])
     return out
-
-def slice_dates(since: str, until: str, chunk_days: int):
-    s = datetime.date.fromisoformat(since)
-    u = datetime.date.fromisoformat(until)
-    cur = s
-    while cur <= u:
-        end = min(u, cur + datetime.timedelta(days=chunk_days-1))
-        yield cur.isoformat(), end.isoformat()
-        cur = end + datetime.timedelta(days=1)
-
-# ========= STATE & CSV =========
-def read_state():
-    if STATE_PATH.exists():
-        try: return json.loads(STATE_PATH.read_text(encoding="utf-8"))
-        except: return None
-    return None
-
-def write_state(obj):
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
-
-def clear_state():
-    if STATE_PATH.exists(): STATE_PATH.unlink()
-
-def ensure_csv_header():
-    CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not CSV_PATH.exists():
-        with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(HEADERS_VN)
-
-def append_csv_rows(rows: List[List]):
-    if not rows: return
-    ensure_csv_header()
-    with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerows(rows)
 
 # ========= ĐỌC GOOGLE SHEET (public viewer) =========
 def to_ymd_any(val: str) -> str:
@@ -449,54 +412,50 @@ def load_config_or_fail() -> dict:
         return load_from_sheet_or_fail()
     return load_from_config_file_or_fail()
 
-# ========= MAIN (resume theo TIME_BUDGET_S) =========
-def run_timed():
+# ========= MAIN (CHẠY 1 PHÁT, KHÔNG RESUME) =========
+def write_full_csv(rows: List[List]):
+    CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(HEADERS_VN)
+        if rows:
+            w.writerows(rows)
+
+def run_once():
     cfg = load_config_or_fail()
-    meta_token = cfg["token"]
+    token = cfg["token"]
 
-    start = time.time()
-    st = read_state()
-    if not st or not isinstance(st.get("queue",[]), list) or not st["queue"]:
-        queue = []
-        for act in cfg["accounts"]:
-            for s,u in slice_dates(cfg["since"], cfg["until"], CHUNK_DAYS):
-                queue.append({"actId": act, "since": s, "until": u})
-        st = {"queue": queue}
-
-    ensure_csv_header()
-    flushed = 0
-
-    while st["queue"] and (time.time()-start) < (TIME_BUDGET_S - 10):
-        job = st["queue"].pop(0)
-
-        meta = fetch_account_meta(job["actId"], meta_token)
+    all_rows: List[List] = []
+    for act in cfg["accounts"]:
+        # 0) Meta + FX
+        meta = fetch_account_meta(act, token)
         cur  = (meta.get("currency") or "VND").upper()
         rate = 1.0 if cur=="VND" else float(cfg["fx"].get(cur, 0))
         if cur!="VND" and (not rate or rate <= 0):
-            emit_error_csv(f"Thiếu tỷ giá VND cho {cur} (FX ở G:H).")
+            emit_error_csv(f"Thiếu tỷ giá VND cho {cur} (bảng FX ở G:H sheet 'api').")
             raise SystemExit(1)
         divisor = minor_unit_divisor(cur)
 
-        b = fetch_budgets_only(job["actId"], meta_token)
+        # 1) Budgets (không phụ thuộc ngày)
+        b = fetch_budgets_only(act, token)
         camp_map, adset_map = build_budget_maps_vnd(b["campaigns"], b["adsets"], rate, divisor)
 
-        adset_spend = fetch_adset_spend_map_vnd(job["actId"], job["since"], job["until"], rate, meta_token)
-        ads = fetch_insights_ad(job["actId"], job["since"], job["until"], meta_token)
+        # 2) Chi tiêu adset theo ngày (VND)
+        adset_spend = fetch_adset_spend_map_vnd(act, cfg["since"], cfg["until"], rate, token)
 
+        # 3) Ad insights theo ngày
+        ads = fetch_insights_ad(act, cfg["since"], cfg["until"], token)
+
+        # 4) Map rows (đã chuyển CTR thành 'xx.xx%')
         rows = map_rows(ads, adset_map, camp_map, adset_spend, meta["name"], rate)
-        append_csv_rows(rows)
-        flushed += len(rows)
+        all_rows.extend(rows)
 
-    if st["queue"]:
-        write_state(st)
-        print(json.dumps({"status":"paused","remaining_jobs":len(st["queue"]),"flushed_rows":flushed}, ensure_ascii=False))
-    else:
-        clear_state()
-        print(json.dumps({"status":"done","flushed_rows":flushed}, ensure_ascii=False))
+    write_full_csv(all_rows)
+    print(json.dumps({"status":"done","rows":len(all_rows)}, ensure_ascii=False))
 
 if __name__ == "__main__":
     try:
-        run_timed()
+        run_once()
     except SystemExit:
         raise
     except Exception as e:
