@@ -20,10 +20,10 @@ HEADERS_VN = [
     "LƯỢT HIỂN THỊ (QC)","NGƯỜI TIẾP CẬN (QC)"
 ]
 
-# Tham số (có thể override bằng ENV; bỏ qua env rỗng)
 PACE_MS            = 800
 RATE_LIMIT_RETRIES = 4
 RATE_LIMIT_ERR     = "RATE_LIMIT"
+DEBUG              = os.environ.get("DEBUG","0") == "1"
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("fb-export")
@@ -67,7 +67,6 @@ def to_num(v):
         return 0.0
 
 def money0(v) -> int:
-    """Làm tròn tiền về đơn vị đồng (số nguyên)."""
     try:
         return int(round(float(v)))
     except:
@@ -99,17 +98,35 @@ def fb_get(url: str, token: str, try_count=0):
     code = r.status_code
     if 200 <= code < 300:
         return r.json()
-    err = None
-    try: err = r.json().get("error")
-    except: pass
-    if code == 403 and err and (err.get("code")==4 or err.get("is_transient") is True):
+
+    # cố gắng parse json lỗi
+    err_json = None
+    try:
+        err_json = r.json()
+    except Exception:
+        pass
+
+    if DEBUG:
+        short = url.split("?")[0]
+        print(f"[FB_ERR] HTTP {code} @ {short}")
+        if err_json: print("[FB_ERR_BODY]", err_json)
+        else: print("[FB_ERR_TEXT]", r.text[:500])
+
+    if err_json:
+        err = err_json.get("error") or {}
+    else:
+        err = {}
+
+    if code == 403 and (err.get("code")==4 or err.get("is_transient") is True):
         if try_count < RATE_LIMIT_RETRIES:
             time.sleep(backoff); return fb_get(url, token, try_count+1)
         raise RuntimeError(RATE_LIMIT_ERR)
-    if (code == 400 and err and str(err.get("code"))=="17") or code == 429 or code >= 500:
+
+    if (code == 400 and str(err.get("code"))=="17") or code == 429 or code >= 500:
         if try_count < MAX_TRIES:
             time.sleep(backoff); return fb_get(url, token, try_count+1)
         raise RuntimeError(f"HTTP {code} after retries: {r.text}")
+
     raise RuntimeError(f"HTTP {code}: {r.text}")
 
 def fb_paged(url_no_token: str, token: str) -> List[dict]:
@@ -161,24 +178,40 @@ def fetch_adset_spend_map_vnd(act_id: str, since: str, until: str, rate: float, 
     return out
 
 def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[dict]:
-    act = requests.utils.quote(act_id)
-    base = f"https://graph.facebook.com/{FB_API_VERSION}/{act}/insights"
-    fields = ",".join([
-        "date_start","account_id","campaign_id","campaign_name",
-        "adset_id","adset_name","ad_id","ad_name",
-        "impressions","reach","spend","clicks","inline_link_clicks",
-        "cpm","cpc","ctr","actions","cost_per_action_type"
-    ])
-    params = {
-        "level":"ad","fields":fields,"limit":"500",
-        "time_range": json.dumps({"since":since,"until":until}),
-        "time_increment":"1","action_report_time":"conversion"
-    }
-    q = "&".join([f"{k}={requests.utils.quote(str(v))}" for k,v in params.items()])
-    url = f"{base}?{q}"
+    def build_url(with_conversion=True):
+        act = requests.utils.quote(act_id)
+        base = f"https://graph.facebook.com/{FB_API_VERSION}/{act}/insights"
+        fields = ",".join([
+            "date_start","account_id","campaign_id","campaign_name",
+            "adset_id","adset_name","ad_id","ad_name",
+            "impressions","reach","spend","clicks","inline_link_clicks",
+            "cpm","cpc","ctr","actions","cost_per_action_type"
+        ])
+        params = {
+            "level":"ad","fields":fields,"limit":"500",
+            "time_range": json.dumps({"since":since,"until":until}),
+            "time_increment":"1",
+        }
+        if with_conversion:
+            params["action_report_time"] = "conversion"
+        q = "&".join([f"{k}={requests.utils.quote(str(v))}" for k,v in params.items()])
+        return f"{base}?{q}"
+
+    url = build_url(with_conversion=True)
     out = []; guard = 0
+    tried_no_conv = False
     while url:
-        j = fb_get(url, token)
+        try:
+            j = fb_get(url, token)
+        except RuntimeError as e:
+            msg = str(e)
+            # fallback nếu "Invalid parameter" khi dùng conversion
+            if (not tried_no_conv) and ("Invalid parameter" in msg or "\"code\":100" in msg):
+                if DEBUG: print("[RETRY] insights without action_report_time=conversion")
+                url = build_url(with_conversion=False)
+                tried_no_conv = True
+                continue
+            raise
         out.extend(j.get("data",[]) or [])
         url = j.get("paging",{}).get("next")
         guard += 1
@@ -248,8 +281,9 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
         impr      = to_num(r.get("impressions"))
         link      = to_num(r.get("inline_link_clicks"))
 
-        cpc_api = r.get("cpc")
-        cpm_api = r.get("cpm")
+        cpc_api  = r.get("cpc")
+        cpm_api  = r.get("cpm")
+
         cpc_click_vnd = money0(to_num(cpc_api)*rate) if (cpc_api not in (None,"")) else (money0(spend_vnd/link) if link>0 else "")
         cpc_all_vnd   = money0(spend_vnd/clicks) if clicks>0 else ""
         cpm_vnd       = money0(to_num(cpm_api)*rate) if (cpm_api not in (None,"")) else (money0((spend_vnd/impr)*1000.0) if impr>0 else "")
@@ -299,19 +333,16 @@ def to_ymd_any(val: str) -> str:
     return s  # yyyy-MM-dd
 
 def _csv_rows_from_gsheet_csv(sheet_id: str, sheet_name: str=None, gid: str=None, a1_range: str=None):
-    # Dùng gviz + range nếu chỉ định vùng; nếu không có range thì ưu tiên export theo gid.
     if a1_range:
         base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv"
-        if sheet_name:
-            base += f"&sheet={requests.utils.quote(sheet_name)}"
+        if sheet_name: base += f"&sheet={requests.utils.quote(sheet_name)}"
         base += f"&range={a1_range}"
     else:
         if gid:
             base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
         else:
             base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv"
-            if sheet_name:
-                base += f"&sheet={requests.utils.quote(sheet_name)}"
+            if sheet_name: base += f"&sheet={requests.utils.quote(sheet_name)}"
     r = requests.get(base, timeout=30)
     r.raise_for_status()
     return list(csv.reader(io.StringIO(r.text)))
@@ -333,7 +364,6 @@ def load_from_sheet_or_fail() -> dict:
     sheet_name = os.environ.get("API_SHEET_NAME", "api")
     sheet_gid  = os.environ.get("API_SHEET_GID")
 
-    # D2:D4 → since, until, accounts
     d_vals = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="D2:D4")
     vals = [(row[0].strip() if row and len(row)>=1 else "") for row in d_vals]
     since_raw  = vals[0] if len(vals)>0 else ""
@@ -360,7 +390,6 @@ def load_from_sheet_or_fail() -> dict:
         raise SystemExit(1)
     accounts = [a if a.startswith("act_") else f"act_{a}" for a in accounts]
 
-    # G:H → FX map
     fx_rows = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="G2:H")
     fx = {}
     for r in fx_rows:
@@ -371,6 +400,9 @@ def load_from_sheet_or_fail() -> dict:
                 if rate>0: fx[cur]=rate
             except: pass
     if "VND" not in fx: fx["VND"] = 1.0
+
+    if DEBUG:
+        print("[CONFIG] since:", since, "until:", until, "accounts:", accounts)
 
     _apply_env_overrides()
     return {"since": since, "until": until, "accounts": accounts, "fx": fx}
@@ -416,6 +448,9 @@ def load_from_config_file_or_fail() -> dict:
         raise SystemExit(1)
     if "VND" not in fx: fx["VND"] = 1.0
 
+    if DEBUG:
+        print("[CONFIG] since:", since, "until:", until, "accounts:", accounts)
+
     _apply_env_overrides()
     return {"since": since, "until": until, "accounts": accounts, "fx": fx}
 
@@ -436,7 +471,6 @@ def write_full_csv(rows: List[List]):
 def run_once():
     cfg = load_config_or_fail()
 
-    # ✅ Chỉ dùng token từ ENV (đặt trong sync.yml)
     token = os.environ.get("META_TOKEN")
     if not token:
         emit_error_csv("Thiếu META_TOKEN trong workflow (sync.yml).")
