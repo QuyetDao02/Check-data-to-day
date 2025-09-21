@@ -22,7 +22,7 @@ jobs:
 
       - name: Run exporter (resume mode)
         env:
-          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SHEET_ID: 1jkdkGG2A8JS2GE728CwvkeVRFNXG7-28TN9GbXo1SYY
           API_SHEET_NAME: api
           API_SHEET_GID: "1875921302"   # đổi đúng gid của sheet 'api' nếu cần
         run: python main.py
