@@ -35,9 +35,9 @@ jobs:
     # - Khi bấm nút (workflow_dispatch): dùng inputs.*
     # - Khi chạy theo lịch: dùng fallback cứng ở dưới (hãy thay sheet id/gid mặc định của bạn)
     env:
-      SHEET_ID:       ${{ inputs.sheet_id       || '1jkdkGG2A8JS2GE728CwvkeVRFNXG7-28TN9GbXo1SYY' }}
-      API_SHEET_NAME: ${{ inputs.api_sheet_name || 'api' }}
-      API_SHEET_GID:  ${{ inputs.api_sheet_gid  || '1875921302' }}
+      SHEET_ID:       1jkdkGG2A8JS2GE728CwvkeVRFNXG7-28TN9GbXo1SYY
+      API_SHEET_NAME: "api"
+      API_SHEET_GID: 1875921302
 
     steps:
       - uses: actions/checkout@v4
