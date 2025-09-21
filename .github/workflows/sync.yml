@@ -1,25 +1,25 @@
-name: FB Sheets Sync
+name: FB CSV Export (no GCP)
 
 on:
   workflow_dispatch: {}
   schedule:
-    # Mỗi giờ vào phút thứ 5 (tránh xung đột đầu giờ). GitHub Actions dùng UTC.
-    - cron: "5 * * * *"
+    - cron: "5 * * * *"   # mỗi giờ (UTC phút 05)
 
 concurrency:
-  group: fb-sheets-sync
+  group: fb-csv-export
   cancel-in-progress: true
 
 jobs:
-  sync:
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -28,19 +28,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Timed batch run (resume mode)
+      - name: Run exporter (resume mode)
         env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          FB_API_VERSION: v20.0
-          SHEET_DATA_NAME: Data
-          STATE_TAB: _state
-          STATE_KEY: DATA_JOB_QUEUE_VND
-          TIME_INCREMENT: "1"
-          CHUNK_DAYS: "3"
-          TIME_BUDGET_S: "300"
-          PACE_MS: "800"
-          RATE_LIMIT_RETRIES: "4"
-          MODE: timed
+          META_TOKEN: ${{ secrets.META_TOKEN }}    # BẮT BUỘC: đặt trong repo secrets
         run: |
           python main.py
+
+      - name: Commit CSV & state
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/latest.csv .state/queue.json || true
+          if ! git diff --cached --quiet; then
+            git commit -m "Update CSV/state [skip ci]"
+            git push
+          fi
