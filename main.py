@@ -8,7 +8,7 @@ ROOT        = pathlib.Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "config.yml"
 CSV_PATH    = ROOT / "data" / "latest.csv"
 
-# ========= CẤU HÌNH GIỐNG APP SCRIPT =========
+# ========= CẤU HÌNH =========
 FB_API_VERSION = "v20.0"
 HEADERS_VN = [
     "NGÀY BẮT ĐẦU","ID TÀI KHOẢN","TÊN TÀI KHOẢN",
@@ -20,7 +20,7 @@ HEADERS_VN = [
     "LƯỢT HIỂN THỊ (QC)","NGƯỜI TIẾP CẬN (QC)"
 ]
 
-# Tham số mặc định (có thể override bằng ENV; bỏ qua env rỗng)
+# Tham số (có thể override bằng ENV; bỏ qua env rỗng)
 PACE_MS            = 800
 RATE_LIMIT_RETRIES = 4
 RATE_LIMIT_ERR     = "RATE_LIMIT"
@@ -71,10 +71,17 @@ def pct2(a, b):
     return None if d <= 0 else (n/d)*100.0
 
 def fmt_pct(val) -> str:
-    """Định dạng phần trăm có dấu % (2 chữ số thập phân)."""
     if val is None or val == "": return ""
     try:
         return f"{round(float(val), 2)}%"
+    except:
+        return ""
+
+def fmt_vnd(x):
+    """Làm tròn đến đồng, trả về int; nếu rỗng thì trả ''."""
+    if x in (None, ""): return ""
+    try:
+        return int(round(float(x)))
     except:
         return ""
 
@@ -147,7 +154,7 @@ def fetch_adset_spend_map_vnd(act_id: str, since: str, until: str, rate: float, 
         j = fb_get(url, token)
         for row in j.get("data",[]) or []:
             key = f"{row.get('adset_id','')}|{row.get('date_start','')}"
-            vnd = (float(row.get("spend",0)) if row.get("spend") else 0.0) * rate
+            vnd = fmt_vnd((float(row.get("spend",0)) if row.get("spend") else 0.0) * rate)
             out[key] = vnd
         url = j.get("paging",{}).get("next")
         guard += 1
@@ -163,10 +170,12 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
         "impressions","reach","spend","clicks","inline_link_clicks",
         "cpm","cpc","ctr","actions","cost_per_action_type"
     ])
+    # v20: bỏ action_report_time, dùng unified attribution
     params = {
         "level":"ad","fields":fields,"limit":"500",
         "time_range": json.dumps({"since":since,"until":until}),
-        "time_increment":"1","action_report_time":"conversion"
+        "time_increment":"1",
+        "use_unified_attribution_setting":"true"
     }
     q = "&".join([f"{k}={requests.utils.quote(str(v))}" for k,v in params.items()])
     url = f"{base}?{q}"
@@ -179,35 +188,17 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
         if guard > 10000: raise RuntimeError("Paging overflow.")
     return out
 
-# ========= FORMAT VND =========
-def vnd0(x):
-    """Về VND làm tròn đến đồng (int). Trả '' nếu trống/None."""
-    if x in (None, ""): return ""
-    try:
-        return int(round(float(x)))
-    except:
-        return ""
-
-def vnd2(x):
-    """Về VND có 2 chữ số thập phân (float). Trả '' nếu trống/None."""
-    if x in (None, ""): return ""
-    try:
-        # Trả về số float 2 lẻ để Sheets hiểu là số (không phải chuỗi)
-        return round(float(x), 2)
-    except:
-        return ""
-
 # ========= TRANSFORMS =========
 def build_budget_maps_vnd(camps, sets, rate, divisor):
     camp_map = {}
     for c in camps or []:
-        daily = (float(c["daily_budget"])/divisor)*rate if c.get("daily_budget") else ""
-        life  = (float(c["lifetime_budget"])/divisor)*rate if c.get("lifetime_budget") else ""
+        daily = fmt_vnd((float(c["daily_budget"])/divisor)*rate) if c.get("daily_budget") else ""
+        life  = fmt_vnd((float(c["lifetime_budget"])/divisor)*rate) if c.get("lifetime_budget") else ""
         camp_map[c["id"]] = {"daily": daily, "lifetime": life}
     adset_map = {}
     for s in sets or []:
-        daily = (float(s["daily_budget"])/divisor)*rate if s.get("daily_budget") else ""
-        life  = (float(s["lifetime_budget"])/divisor)*rate if s.get("lifetime_budget") else ""
+        daily = fmt_vnd((float(s["daily_budget"])/divisor)*rate) if s.get("daily_budget") else ""
+        life  = fmt_vnd((float(s["lifetime_budget"])/divisor)*rate) if s.get("lifetime_budget") else ""
         adset_map[s["id"]] = {"daily": daily, "lifetime": life, "campaign_id": s.get("campaign_id")}
     return camp_map, adset_map
 
@@ -255,57 +246,58 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
         key = f"{r.get('adset_id','')}|{r.get('date_start','')}"
         adset_spend_vnd = adset_spend_map.get(key, "")
 
-        spend_vnd = to_num(r.get("spend")) * rate
+        spend_vnd = fmt_vnd(to_num(r.get("spend")) * rate)
         clicks    = to_num(r.get("clicks"))
         impr      = to_num(r.get("impressions"))
         link      = to_num(r.get("inline_link_clicks"))
 
-        cpc_api  = r.get("cpc")  # đơn vị tiền gốc của account
+        cpc_api  = r.get("cpc")   # đơn vị tiền gốc
         cpm_api  = r.get("cpm")
-        ctr_api  = r.get("ctr")  # %
+        ctr_api  = r.get("ctr")   # %
 
-        # Chuyển về VND
-        cpc_click_vnd = (to_num(cpc_api)*rate) if (cpc_api not in (None,"")) else ((spend_vnd/link) if link>0 else "")
-        cpc_all_vnd   = (spend_vnd/clicks) if clicks>0 else ""
-        cpm_vnd       = (to_num(cpm_api)*rate) if (cpm_api not in (None,"")) else (((spend_vnd/impr)*1000.0) if impr>0 else "")
+        # CPC click (ưu tiên API; fallback = spend/link)
+        cpc_click_raw = (to_num(cpc_api) * rate) if (cpc_api not in (None,"")) else ((to_num(spend_vnd)/link) if link>0 else "")
+        cpc_click_vnd = fmt_vnd(cpc_click_raw)
 
-        # CTR %
+        # CPC tất cả (spend/click)
+        cpc_all_vnd   = fmt_vnd((to_num(spend_vnd)/clicks) if clicks>0 else "")
+
+        # CPM (ưu tiên API; fallback = spend/impr*1000)
+        cpm_raw  = (to_num(cpm_api)*rate) if (cpm_api not in (None,"")) else (((to_num(spend_vnd)/impr)*1000.0) if impr>0 else "")
+        cpm_vnd  = fmt_vnd(cpm_raw)
+
         ctr_all_pct   = to_num(ctr_api) if (ctr_api not in (None,"")) else (pct2(clicks, impr) or "")
         ctr_click_pct = pct2(link, impr) or ""
 
-        # Messages
         msg = extract_msg_started(r)
         cost_per_msg = pick_cost_per_action(r, "messaging_conversation_started")
-        cost_per_msg_vnd = (to_num(cost_per_msg)*rate) if cost_per_msg!="" else ((spend_vnd/msg) if msg>0 else "")
-
-        # Daily budget theo campaign của adset (fallback campaign trên row)
-        campaign_daily_vnd = camp_map.get(s.get("campaign_id",""),{}).get("daily","") if s.get("campaign_id") else c.get("daily","")
+        cost_per_msg_vnd = fmt_vnd((to_num(cost_per_msg)*rate) if cost_per_msg!="" else ((to_num(spend_vnd)/msg) if msg>0 else ""))
 
         out.append([
             r.get("date_start",""),
             r.get("account_id",""),
             account_name or "",
             r.get("campaign_name",""),
-            vnd0(campaign_daily_vnd),     # NGÂN SÁCH CHIẾN DỊCH (VND) -> về đồng
+            camp_map.get(s.get("campaign_id",""),{}).get("daily","") if s.get("campaign_id") else c.get("daily",""),
             r.get("adset_name",""),
-            vnd0(s.get("daily","")),      # NGÂN SÁCH NHÓM QUẢNG CÁO (VND) -> về đồng
-            vnd0(adset_spend_vnd),        # CHI TIÊU NHÓM QUẢNG CÁO (VND) -> về đồng
+            s.get("daily",""),
+            adset_spend_vnd or "",
             r.get("ad_name",""),
             msg or "",
             msg or "",
-            vnd2(cost_per_msg_vnd),       # CHI PHÍ/MỖI KẾT QUẢ (VND) -> 2 lẻ (đổi vnd0 nếu muốn)
-            vnd0(spend_vnd),              # CHI TIÊU QUẢNG CÁO (VND) -> về đồng
-            vnd0(cpc_click_vnd),          # CPC CLICK (QC) (VND) -> về đồng
-            vnd0(cpc_all_vnd),            # CPC TẤT CẢ (QC) (VND) -> về đồng
-            fmt_pct(ctr_click_pct),       # CTR CLICK (QC) (%)
-            fmt_pct(ctr_all_pct),         # CTR TẤT CẢ (QC) (%)
-            vnd0(cpm_vnd),                # CPM (QC) (VND) -> về đồng
+            cost_per_msg_vnd or "",
+            spend_vnd or "",
+            cpc_click_vnd or "",
+            cpc_all_vnd or "",
+            fmt_pct(ctr_click_pct),
+            fmt_pct(ctr_all_pct),
+            cpm_vnd or "",
             impr or "",
             r.get("reach","") or ""
         ])
     return out
 
-# ========= ĐỌC GOOGLE SHEET (public viewer) =========
+# ========= ĐỌC GOOGLE SHEET =========
 def to_ymd_any(val: str) -> str:
     s = (val or "").strip()
     if not s: return ""
@@ -315,10 +307,9 @@ def to_ymd_any(val: str) -> str:
         if len(p)==3:
             d, m, y = p[0], p[1], p[2]
             return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
-    return s  # đã là yyyy-MM-dd
+    return s
 
 def _csv_rows_from_gsheet_csv(sheet_id: str, sheet_name: str=None, gid: str=None, a1_range: str=None):
-    # Ưu tiên export theo gid; nếu không có gid thì dùng gviz theo sheet_name
     if gid:
         base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
         if a1_range: base += f"&range={a1_range}"
@@ -339,7 +330,6 @@ def load_from_sheet_or_fail() -> dict:
     sheet_name = os.environ.get("API_SHEET_NAME", "api")
     sheet_gid  = os.environ.get("API_SHEET_GID")
 
-    # D2:D4 → since, until, accounts
     d_vals = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="D2:D4")
     vals = [ (row[0].strip() if row and len(row)>=1 else "") for row in d_vals ]
     since_raw  = vals[0] if len(vals)>0 else ""
@@ -348,23 +338,21 @@ def load_from_sheet_or_fail() -> dict:
 
     since = to_ymd_any(since_raw)
     until = to_ymd_any(until_raw)
-
     if not since or not until or not accounts_s:
         emit_error_csv("Thiếu cấu hình trong sheet 'api': D2 (since), D3 (until), D4 (ad accounts).")
         raise SystemExit(1)
-
     try: datetime.date.fromisoformat(since)
-    except: emit_error_csv("Sai định dạng 'since' (yyyy-MM-dd hoặc dd/MM/yyyy)"); raise SystemExit(1)
+    except: emit_error_csv("Sai định dạng 'since'"); raise SystemExit(1)
     try: datetime.date.fromisoformat(until)
-    except: emit_error_csv("Sai định dạng 'until' (yyyy-MM-dd hoặc dd/MM/yyyy)"); raise SystemExit(1)
+    except: emit_error_csv("Sai định dạng 'until'"); raise SystemExit(1)
 
     accounts = [a.strip() for a in accounts_s.split(",") if a.strip()]
     if not accounts:
-        emit_error_csv("D4 rỗng: cần danh sách account, phân tách dấu phẩy (KHÔNG cần 'act_').")
+        emit_error_csv("D4 rỗng: cần danh sách account (không cần 'act_').")
         raise SystemExit(1)
     accounts = [a if a.startswith("act_") else f"act_{a}" for a in accounts]
 
-    # D6 → token (KHÔNG BẮT BUỘC). Có thì lấy, không có thì để rỗng — ưu tiên ENV META_TOKEN.
+    # D6: token (optional – ưu tiên ENV)
     token = ""
     try:
         token_rows = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="D6:D6")
@@ -372,7 +360,7 @@ def load_from_sheet_or_fail() -> dict:
     except Exception:
         token = ""
 
-    # G:H → FX map
+    # G:H: FX
     fx_rows = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="G2:H")
     fx = {}
     for r in fx_rows:
@@ -401,7 +389,6 @@ def load_from_config_file_or_fail() -> dict:
     if not cfg.get("since"):    missing.append("since")
     if not cfg.get("until"):    missing.append("until")
     if not cfg.get("accounts"): missing.append("accounts")
-    # token có thể để trống nếu đã set ENV META_TOKEN
     if missing:
         emit_error_csv("Thiếu cấu hình trong config.yml: " + ", ".join(missing))
         raise SystemExit(1)
@@ -409,9 +396,9 @@ def load_from_config_file_or_fail() -> dict:
     since = to_ymd_any(cfg["since"])
     until = to_ymd_any(cfg["until"])
     try: datetime.date.fromisoformat(since)
-    except: emit_error_csv("Sai định dạng 'since' trong config.yml"); raise SystemExit(1)
+    except: emit_error_csv("Sai 'since' trong config.yml"); raise SystemExit(1)
     try: datetime.date.fromisoformat(until)
-    except: emit_error_csv("Sai định dạng 'until' trong config.yml"); raise SystemExit(1)
+    except: emit_error_csv("Sai 'until' trong config.yml"); raise SystemExit(1)
 
     accounts = [str(a).strip() for a in cfg["accounts"] if str(a).strip()]
     if not accounts:
@@ -432,12 +419,11 @@ def load_from_config_file_or_fail() -> dict:
     return {"since": since, "until": until, "accounts": accounts, "fx": fx, "token": token}
 
 def load_config_or_fail() -> dict:
-    # Ưu tiên đọc từ SHEET_ID (sheet 'api'), nếu không có thì fallback config.yml
     if os.environ.get("SHEET_ID"):
         return load_from_sheet_or_fail()
     return load_from_config_file_or_fail()
 
-# ========= MAIN (CHẠY 1 PHÁT, KHÔNG RESUME) =========
+# ========= MAIN (CHẠY 1 PHÁT) =========
 def write_full_csv(rows: List[List]):
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
@@ -448,7 +434,6 @@ def write_full_csv(rows: List[List]):
 
 def run_once():
     cfg = load_config_or_fail()
-    # Ưu tiên ENV META_TOKEN; nếu không có thì thử từ cfg (sheet/config)
     token = os.environ.get("META_TOKEN") or cfg.get("token","")
     if not token:
         emit_error_csv("Thiếu token: set ENV META_TOKEN (Actions Secret) hoặc cấu hình trong file/sheet.")
@@ -456,7 +441,6 @@ def run_once():
 
     all_rows: List[List] = []
     for act in cfg["accounts"]:
-        # 0) Meta + FX
         meta = fetch_account_meta(act, token)
         cur  = (meta.get("currency") or "VND").upper()
         rate = 1.0 if cur=="VND" else float(cfg["fx"].get(cur, 0))
@@ -465,17 +449,12 @@ def run_once():
             raise SystemExit(1)
         divisor = minor_unit_divisor(cur)
 
-        # 1) Budgets (không phụ thuộc ngày)
-        b = fetch_budgets_only(act, token)
-        camp_map, adset_map = build_budget_maps_vnd(b["campaigns"], b["adsets"], rate, divisor)
+        budgets = fetch_budgets_only(act, token)
+        camp_map, adset_map = build_budget_maps_vnd(budgets["campaigns"], budgets["adsets"], rate, divisor)
 
-        # 2) Chi tiêu adset theo ngày (VND)
         adset_spend = fetch_adset_spend_map_vnd(act, cfg["since"], cfg["until"], rate, token)
-
-        # 3) Ad insights theo ngày
         ads = fetch_insights_ad(act, cfg["since"], cfg["until"], token)
 
-        # 4) Map rows (đảm bảo CPC/CPM/budgets về đồng VND)
         rows = map_rows(ads, adset_map, camp_map, adset_spend, meta["name"], rate)
         all_rows.extend(rows)
 
