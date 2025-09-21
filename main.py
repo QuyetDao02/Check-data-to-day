@@ -1,3 +1,4 @@
+# main.py
 import os, io, json, time, math, random, datetime, csv, logging
 from typing import List, Dict
 import requests, yaml, pathlib
@@ -21,7 +22,7 @@ HEADERS_VN = [
     "LƯỢT HIỂN THỊ (QC)","NGƯỜI TIẾP CẬN (QC)"
 ]
 
-# Tham số nâng cao (có thể override bằng sheet/config.yml)
+# Tham số nâng cao (có thể override bằng ENV hoặc config.yml)
 CHUNK_DAYS = 3
 TIME_BUDGET_S = 300
 PACE_MS = 800
@@ -324,6 +325,16 @@ def _csv_rows_from_gsheet_csv(sheet_id: str, sheet_name: str=None, gid: str=None
     r.raise_for_status()
     return list(csv.reader(io.StringIO(r.text)))
 
+def load_token_from_sheet(sheet_id: str, sheet_name: str = "api", gid: str = None) -> str:
+    """Đọc token ở ô api!D6 (1 ô) qua CSV export."""
+    rows = _csv_rows_from_gsheet_csv(
+        sheet_id,
+        sheet_name=sheet_name,
+        gid=gid,
+        a1_range="D6:D6"
+    )
+    return (rows[0][0].strip() if rows and rows[0] and len(rows[0]) >= 1 else "")
+
 def load_from_sheet_or_fail() -> dict:
     sheet_id   = os.environ.get("SHEET_ID")  # bắt buộc nếu dùng sheet
     if not sheet_id:
@@ -371,7 +382,7 @@ def load_from_sheet_or_fail() -> dict:
             except: pass
     if "VND" not in fx: fx["VND"] = 1.0
 
-    # override nâng cao (nếu có, đặt ở I2:K?) — đơn giản dùng ENV là đủ
+    # override nâng cao (nếu có)
     global CHUNK_DAYS, TIME_BUDGET_S, PACE_MS, RATE_LIMIT_RETRIES
     CHUNK_DAYS = int(os.environ.get("CHUNK_DAYS", CHUNK_DAYS))
     TIME_BUDGET_S = int(os.environ.get("TIME_BUDGET_S", TIME_BUDGET_S))
@@ -436,9 +447,20 @@ def load_config_or_fail() -> dict:
 
 # ========= MAIN (resume theo TIME_BUDGET_S) =========
 def run_timed():
-    meta_token = os.environ.get("META_TOKEN")
+    # ƯU TIÊN LẤY TOKEN Ở api!D6; nếu trống thì dùng META_TOKEN (GitHub Secret)
+    sheet_id   = os.environ.get("SHEET_ID")
+    sheet_name = os.environ.get("API_SHEET_NAME", "api")
+    sheet_gid  = os.environ.get("API_SHEET_GID")
+
+    meta_token = ""
+    if sheet_id:
+        meta_token = load_token_from_sheet(sheet_id, sheet_name, sheet_gid).strip()
+
     if not meta_token:
-        emit_error_csv("Thiếu GitHub Secret META_TOKEN")
+        meta_token = (os.environ.get("META_TOKEN") or "").strip()
+
+    if not meta_token:
+        emit_error_csv("Thiếu token: điền ở 'api'!D6 hoặc tạo Secret META_TOKEN trong repo.")
         raise SystemExit(1)
 
     cfg = load_config_or_fail()
