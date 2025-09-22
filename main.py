@@ -1,3 +1,4 @@
+# main.py
 import os, io, json, time, math, random, datetime, csv, logging
 from typing import List
 import requests, yaml, pathlib
@@ -197,7 +198,6 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
             "time_increment":"1",
         }
         if mode in ("conv", "plain"):
-            # 2 chế độ đầu vẫn cố lấy actions
             fields += action_fields
         if mode == "conv":
             params["action_report_time"] = "conversion"
@@ -209,9 +209,7 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
     data: List[dict] = []
 
     for mode in modes:
-        url = build_url(mode) if mode != "basic" else build_url("plain").replace(
-            ",".join(action_fields), ""  # gỡ actions khỏi fields
-        )
+        url = build_url(mode) if mode != "basic" else build_url("plain").replace(",".join(action_fields), "")
         if DEBUG:
             print(f"[INSIGHTS] try mode={mode}")
 
@@ -222,29 +220,72 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
                 j = fb_get(url, token)
             except RuntimeError as e:
                 msg = str(e)
-                # gặp invalid parameter -> chuyển sang mode tiếp theo
                 if ("Invalid parameter" in msg) or ("\"code\":100" in msg) or ("error_subcode\":1504018" in msg):
-                    if DEBUG:
-                        print(f"[INSIGHTS] mode={mode} got Invalid parameter -> fallback")
-                    out = []
-                    url = None  # break inner loop
-                    break
-                # lỗi khác -> ném ra ngoài
+                    if DEBUG: print(f"[INSIGHTS] mode={mode} got Invalid parameter -> fallback")
+                    out = []; url = None; break
                 raise
             out.extend(j.get("data",[]) or [])
             url = j.get("paging",{}).get("next")
             guard += 1
-            if guard > 10000:
-                raise RuntimeError("Paging overflow.")
-
+            if guard > 10000: raise RuntimeError("Paging overflow.")
         if out:
             data = out
-            if DEBUG:
-                print(f"[INSIGHTS] success with mode={mode}, rows={len(data)}")
-            break  # thành công thì thoát
-
+            if DEBUG: print(f"[INSIGHTS] success with mode={mode}, rows={len(data)}")
+            break
     return data
 
+# ========= CHỌN "KẾT QUẢ" & CPA =========
+RESULT_PRIORITY = [
+    ("messaging", [
+        "messaging_conversation_started","messaging_conversations_started","messaging_first_reply",
+        "onsite_conversion.messaging_first_reply",
+        "onsite_conversion.messaging_conversation_started_1d",
+        "onsite_conversion.messaging_conversation_started_7d",
+        "onsite_conversion.messaging_conversation_started_28d",
+    ]),
+    ("lead", [
+        "leadgen","lead","onsite_conversion.lead","onsite_conversion.lead_grouped"
+    ]),
+    ("purchase", [
+        "purchase","offsite_conversion.fb_pixel_purchase","omni_purchase","onsite_conversion.purchase"
+    ]),
+    ("link_click", [
+        "link_click","inline_link_click"
+    ]),
+]
+
+def extract_primary_result_and_key(r: dict):
+    """Trả về (result_count, action_key) từ r['actions'] theo ưu tiên."""
+    arr = r.get("actions")
+    if isinstance(arr, list):
+        pairs = [(str(it.get("action_type","")).lower(), to_num(it.get("value"))) for it in arr]
+        for _, keys in RESULT_PRIORITY:
+            total = 0.0; key_used = None
+            for want in keys:
+                w = want.lower()
+                for k, v in pairs:
+                    if k == w or w in k:
+                        total += v
+                        key_used = w
+            if total > 0:
+                return int(round(total)), key_used
+    # Fallback
+    if to_num(r.get("inline_link_clicks")) > 0:
+        return int(to_num(r.get("inline_link_clicks"))), "inline_link_clicks"
+    if to_num(r.get("clicks")) > 0:
+        return int(to_num(r.get("clicks"))), "clicks"
+    return 0, ""
+
+def extract_cpa_vnd(r: dict, rate: float, action_key: str, spend_vnd: float, result_count: int):
+    """CPA theo action đã chọn; hoặc chi tiêu/kết quả."""
+    arr = r.get("cost_per_action_type")
+    if isinstance(arr, list) and action_key:
+        ak = action_key.lower()
+        for it in arr:
+            at = str(it.get("action_type","")).lower()
+            if at == ak or ak in at:
+                return money0(to_num(it.get("value")) * rate)
+    return money0(spend_vnd / result_count) if result_count > 0 else ""
 
 # ========= TRANSFORMS =========
 def build_budget_maps_vnd(camps, sets, rate, divisor):
@@ -284,18 +325,6 @@ def extract_msg_started(r: dict) -> int:
                 except: return 0
     return 0
 
-def pick_cost_per_action(r: dict, type_name: str):
-    arr = r.get("cost_per_action_type")
-    if not isinstance(arr, list): return ""
-    nd = type_name.lower()
-    for it in arr:
-        if str(it.get("action_type","")).lower() == nd:
-            return it.get("value","")
-    for it in arr:
-        if nd in str(it.get("action_type","")).lower():
-            return it.get("value","")
-    return ""
-
 def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
     out = []
     for r in ad_rows or []:
@@ -320,9 +349,12 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
         ctr_all_pct   = to_num(ctr_api) if (ctr_api not in (None,"")) else (pct2(clicks, impr) or "")
         ctr_click_pct = pct2(link, impr) or ""
 
-        msg = extract_msg_started(r)
-        cost_per_msg = pick_cost_per_action(r, "messaging_conversation_started")
-        cost_per_msg_vnd = money0(to_num(cost_per_msg)*rate) if cost_per_msg!="" else (money0(spend_vnd/msg) if msg>0 else "")
+        # 1) Lượt bắt đầu trò chuyện (cột riêng)
+        msg_started = extract_msg_started(r)
+
+        # 2) KẾT QUẢ + CPA theo mục tiêu
+        result_count, result_key = extract_primary_result_and_key(r)
+        cpa_vnd = extract_cpa_vnd(r, rate, result_key, spend_vnd, result_count)
 
         out.append([
             r.get("date_start",""),
@@ -334,9 +366,9 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
             s.get("daily",""),
             adset_spend_vnd or "",
             r.get("ad_name",""),
-            msg or "",
-            msg or "",
-            cost_per_msg_vnd or "",
+            msg_started or "",          # LƯỢT BẮT ĐẦU TRÒ CHUYỆN
+            result_count or "",         # KẾT QUẢ (tuỳ mục tiêu)
+            cpa_vnd or "",              # CHI PHÍ/MỖI KẾT QUẢ (VND)
             spend_vnd or "",
             cpc_click_vnd or "",
             cpc_all_vnd or "",
@@ -417,8 +449,7 @@ def load_from_sheet_or_fail() -> dict:
     until = to_ymd_any(until_raw)
 
     if not since or not until or not accounts_s:
-        if DEBUG:
-            print("[SHEET DUMP D2:D4]", d_vals)
+        if DEBUG: print("[SHEET DUMP D2:D4]", d_vals)
         emit_error_csv("Thiếu cấu hình trong sheet 'api': D2 (since), D3 (until), D4 (ad accounts).")
         raise SystemExit(1)
 
