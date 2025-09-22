@@ -1,7 +1,6 @@
 import os, io, json, time, math, random, datetime, csv, logging
-from typing import List, Dict
+from typing import List
 import requests, yaml, pathlib
-from pathlib import Path
 
 # ========= ĐƯỜNG DẪN =========
 ROOT        = pathlib.Path(__file__).resolve().parent
@@ -99,12 +98,9 @@ def fb_get(url: str, token: str, try_count=0):
     if 200 <= code < 300:
         return r.json()
 
-    # cố gắng parse json lỗi
     err_json = None
-    try:
-        err_json = r.json()
-    except Exception:
-        pass
+    try: err_json = r.json()
+    except: pass
 
     if DEBUG:
         short = url.split("?")[0]
@@ -112,10 +108,7 @@ def fb_get(url: str, token: str, try_count=0):
         if err_json: print("[FB_ERR_BODY]", err_json)
         else: print("[FB_ERR_TEXT]", r.text[:500])
 
-    if err_json:
-        err = err_json.get("error") or {}
-    else:
-        err = {}
+    err = (err_json or {}).get("error", {})
 
     if code == 403 and (err.get("code")==4 or err.get("is_transient") is True):
         if try_count < RATE_LIMIT_RETRIES:
@@ -198,14 +191,12 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
         return f"{base}?{q}"
 
     url = build_url(with_conversion=True)
-    out = []; guard = 0
-    tried_no_conv = False
+    out = []; guard = 0; tried_no_conv = False
     while url:
         try:
             j = fb_get(url, token)
         except RuntimeError as e:
             msg = str(e)
-            # fallback nếu "Invalid parameter" khi dùng conversion
             if (not tried_no_conv) and ("Invalid parameter" in msg or "\"code\":100" in msg):
                 if DEBUG: print("[RETRY] insights without action_report_time=conversion")
                 url = build_url(with_conversion=False)
@@ -213,8 +204,7 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
                 continue
             raise
         out.extend(j.get("data",[]) or [])
-        url = j.get("paging",{}).get("next")
-        guard += 1
+        url = j.get("paging",{}).get("next"); guard += 1
         if guard > 10000: raise RuntimeError("Paging overflow.")
     return out
 
@@ -333,19 +323,34 @@ def to_ymd_any(val: str) -> str:
     return s  # yyyy-MM-dd
 
 def _csv_rows_from_gsheet_csv(sheet_id: str, sheet_name: str=None, gid: str=None, a1_range: str=None):
-    if a1_range:
-        base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv"
-        if sheet_name: base += f"&sheet={requests.utils.quote(sheet_name)}"
-        base += f"&range={a1_range}"
-    else:
-        if gid:
-            base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-        else:
-            base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv"
-            if sheet_name: base += f"&sheet={requests.utils.quote(sheet_name)}"
-    r = requests.get(base, timeout=30)
-    r.raise_for_status()
-    return list(csv.reader(io.StringIO(r.text)))
+    """
+    Ưu tiên endpoint export?format=csv&gid=... (ổn định với ô chứa dấu phẩy như D4).
+    Nếu lỗi hoặc không có gid thì fallback sang gviz/tq.
+    """
+    urls = []
+    if gid:
+        u = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+        if a1_range: u += f"&range={a1_range}"
+        urls.append(u)
+    # fallback gviz
+    base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv"
+    if sheet_name: base += f"&sheet={requests.utils.quote(sheet_name)}"
+    if a1_range:   base += f"&range={a1_range}"
+    urls.append(base)
+
+    last_err = None
+    for u in urls:
+        try:
+            r = requests.get(u, timeout=30); r.raise_for_status()
+            rows = list(csv.reader(io.StringIO(r.text)))
+            if rows:
+                return rows
+        except Exception as e:
+            last_err = e
+            continue
+    if last_err:
+        raise last_err
+    return []
 
 def _clamp_dates(since: str, until: str) -> (str, str):
     today = datetime.date.today()
@@ -374,6 +379,8 @@ def load_from_sheet_or_fail() -> dict:
     until = to_ymd_any(until_raw)
 
     if not since or not until or not accounts_s:
+        if DEBUG:
+            print("[SHEET DUMP D2:D4]", d_vals)
         emit_error_csv("Thiếu cấu hình trong sheet 'api': D2 (since), D3 (until), D4 (ad accounts).")
         raise SystemExit(1)
 
@@ -425,8 +432,7 @@ def load_from_config_file_or_fail() -> dict:
         emit_error_csv("Thiếu cấu hình trong config.yml: " + ", ".join(missing))
         raise SystemExit(1)
 
-    since = to_ymd_any(cfg["since"])
-    until = to_ymd_any(cfg["until"])
+    since = to_ymd_any(cfg["since"]); until = to_ymd_any(cfg["until"])
     try: datetime.date.fromisoformat(since)
     except: emit_error_csv("Sai định dạng 'since' trong config.yml"); raise SystemExit(1)
     try: datetime.date.fromisoformat(until)
@@ -436,16 +442,14 @@ def load_from_config_file_or_fail() -> dict:
 
     accounts = [str(a).strip() for a in cfg["accounts"] if str(a).strip()]
     if not accounts:
-        emit_error_csv("Danh sách accounts rỗng trong config.yml")
-        raise SystemExit(1)
+        emit_error_csv("Danh sách accounts rỗng trong config.yml"); raise SystemExit(1)
     accounts = [a if a.startswith("act_") else f"act_{a}" for a in accounts]
 
     fx_raw = cfg.get("fx") or {}
     try:
         fx = {str(k).upper(): float(v) for k,v in fx_raw.items()}
     except Exception:
-        emit_error_csv("Sai cấu hình fx trong config.yml (phải là số)")
-        raise SystemExit(1)
+        emit_error_csv("Sai cấu hình fx trong config.yml (phải là số)"); raise SystemExit(1)
     if "VND" not in fx: fx["VND"] = 1.0
 
     if DEBUG:
