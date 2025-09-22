@@ -171,42 +171,80 @@ def fetch_adset_spend_map_vnd(act_id: str, since: str, until: str, rate: float, 
     return out
 
 def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[dict]:
-    def build_url(with_conversion=True):
-        act = requests.utils.quote(act_id)
-        base = f"https://graph.facebook.com/{FB_API_VERSION}/{act}/insights"
-        fields = ",".join([
-            "date_start","account_id","campaign_id","campaign_name",
-            "adset_id","adset_name","ad_id","ad_name",
-            "impressions","reach","spend","clicks","inline_link_clicks",
-            "cpm","cpc","ctr","actions","cost_per_action_type"
-        ])
+    """
+    Gọi insights với 3 chế độ fallback để né 'Invalid parameter':
+      - conv:   action_report_time=conversion + có actions
+      - plain:  KHÔNG action_report_time + có actions
+      - basic:  KHÔNG action_report_time + KHÔNG actions/cost_per_action_type
+    """
+    act = requests.utils.quote(act_id)
+    base = f"https://graph.facebook.com/{FB_API_VERSION}/{act}/insights"
+
+    base_fields = [
+        "date_start","account_id","campaign_id","campaign_name",
+        "adset_id","adset_name","ad_id","ad_name",
+        "impressions","reach","spend","clicks","inline_link_clicks",
+        "cpm","cpc","ctr"
+    ]
+    action_fields = ["actions","cost_per_action_type"]
+
+    def build_url(mode: str) -> str:
+        fields = base_fields.copy()
         params = {
-            "level":"ad","fields":fields,"limit":"500",
+            "level":"ad",
+            "limit":"500",
             "time_range": json.dumps({"since":since,"until":until}),
             "time_increment":"1",
         }
-        if with_conversion:
+        if mode in ("conv", "plain"):
+            # 2 chế độ đầu vẫn cố lấy actions
+            fields += action_fields
+        if mode == "conv":
             params["action_report_time"] = "conversion"
+        params["fields"] = ",".join(fields)
         q = "&".join([f"{k}={requests.utils.quote(str(v))}" for k,v in params.items()])
         return f"{base}?{q}"
 
-    url = build_url(with_conversion=True)
-    out = []; guard = 0; tried_no_conv = False
-    while url:
-        try:
-            j = fb_get(url, token)
-        except RuntimeError as e:
-            msg = str(e)
-            if (not tried_no_conv) and ("Invalid parameter" in msg or "\"code\":100" in msg):
-                if DEBUG: print("[RETRY] insights without action_report_time=conversion")
-                url = build_url(with_conversion=False)
-                tried_no_conv = True
-                continue
-            raise
-        out.extend(j.get("data",[]) or [])
-        url = j.get("paging",{}).get("next"); guard += 1
-        if guard > 10000: raise RuntimeError("Paging overflow.")
-    return out
+    modes = ["conv", "plain", "basic"]
+    data: List[dict] = []
+
+    for mode in modes:
+        url = build_url(mode) if mode != "basic" else build_url("plain").replace(
+            ",".join(action_fields), ""  # gỡ actions khỏi fields
+        )
+        if DEBUG:
+            print(f"[INSIGHTS] try mode={mode}")
+
+        out = []
+        guard = 0
+        while url:
+            try:
+                j = fb_get(url, token)
+            except RuntimeError as e:
+                msg = str(e)
+                # gặp invalid parameter -> chuyển sang mode tiếp theo
+                if ("Invalid parameter" in msg) or ("\"code\":100" in msg) or ("error_subcode\":1504018" in msg):
+                    if DEBUG:
+                        print(f"[INSIGHTS] mode={mode} got Invalid parameter -> fallback")
+                    out = []
+                    url = None  # break inner loop
+                    break
+                # lỗi khác -> ném ra ngoài
+                raise
+            out.extend(j.get("data",[]) or [])
+            url = j.get("paging",{}).get("next")
+            guard += 1
+            if guard > 10000:
+                raise RuntimeError("Paging overflow.")
+
+        if out:
+            data = out
+            if DEBUG:
+                print(f"[INSIGHTS] success with mode={mode}, rows={len(data)}")
+            break  # thành công thì thoát
+
+    return data
+
 
 # ========= TRANSFORMS =========
 def build_budget_maps_vnd(camps, sets, rate, divisor):
