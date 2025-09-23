@@ -260,23 +260,7 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
             break
     return data
 
-# ========= RESULT SELECTION =========
-def priority_for_objective(objective: str):
-    o = (objective or "").upper()
-    if "MESSAGE" in o:
-        return ["messaging", "lead", "purchase", "link_click"]
-    if "LEAD" in o:
-        return ["lead", "messaging", "purchase", "link_click"]
-    if "SALES" in o or "CONVERSION" in o or "CATALOG" in o or "PURCHASE" in o:
-        return ["purchase", "lead", "link_click", "messaging"]
-    if "TRAFFIC" in o or "LINK_CLICK" in o:
-        return ["link_click", "lead", "purchase", "messaging"]
-    if "REACH" in o:
-        return ["__reach__", "link_click"]
-    if "AWARENESS" in o or "BRAND" in o:
-        return ["__impr__", "link_click"]
-    return ["messaging","lead","purchase","link_click"]
-
+# ========= RESULT (CHỈ Lead & Messaging) =========
 RESULT_KEYS = {
     "messaging": [
         "messaging_conversation_started","messaging_conversations_started","messaging_first_reply",
@@ -285,60 +269,54 @@ RESULT_KEYS = {
         "onsite_conversion.messaging_conversation_started_7d",
         "onsite_conversion.messaging_conversation_started_28d",
     ],
-    # bổ sung đủ các biến thể lead để luôn bắt được
     "lead": [
         "leadgen","lead","onsite_conversion.lead","onsite_conversion.lead_grouped",
         "offsite_conversion.fb_pixel_lead","omni_lead","on_facebook_lead"
     ],
-    "purchase": ["purchase","offsite_conversion.fb_pixel_purchase","omni_purchase","onsite_conversion.purchase"],
-    "link_click": ["inline_link_click","link_click"],
 }
 
-def extract_result_using_objective(r: dict, objective: str):
-    pr = priority_for_objective(objective)
-
-    # Ưu tiên reach/impressions cho các objective nhận diện/tiếp cận
-    if "__reach__" in pr:
-        v = int(to_num(r.get("reach")))
-        if v > 0:
-            return v, "__reach__"
-
-    if "__impr__" in pr:
-        v = int(to_num(r.get("impressions")))
-        if v > 0:
-            return v, "__impr__"
-
-    # Chuẩn bị cặp (action_type, value) từ trường actions
+def extract_msg_started(r: dict) -> int:
     arr = r.get("actions")
-    pairs = []
-    if isinstance(arr, list):
-        pairs = [(str(it.get("action_type", "")).lower(), to_num(it.get("value"))) for it in arr]
+    if not isinstance(arr, list): return 0
+    keys = RESULT_KEYS["messaging"]
+    # match exact trước
+    for k in keys:
+        nd = k.lower()
+        for it in arr:
+            if str(it.get("action_type","")).lower() == nd:
+                try: return int(float(it.get("value",0)))
+                except: return 0
+    # rồi tới contains
+    for k in keys:
+        nd = k.lower()
+        for it in arr:
+            if nd in str(it.get("action_type","")).lower():
+                try: return int(float(it.get("value",0)))
+                except: return 0
+    return 0
 
-    # Duyệt theo thứ tự ưu tiên của objective
-    for bucket in pr:
-        if bucket.startswith("__"):
-            continue
-        keys = [k.lower() for k in RESULT_KEYS[bucket]]
-        total = 0.0
-        used = None
-        for want in keys:
-            for k, v in pairs:
-                if k == want or want in k:
-                    total += v
-                    used = want
-        if total > 0:
-            return int(round(total)), used
-
-    # Fallback
-    if to_num(r.get("inline_link_clicks")) > 0:
-        return int(to_num(r.get("inline_link_clicks"))), "inline_link_clicks"
-    if to_num(r.get("clicks")) > 0:
-        return int(to_num(r.get("clicks"))), "clicks"
-    return 0, ""
+def extract_bucket_value(r: dict, bucket: str) -> (int, str):
+    """Trả (result_count, action_key_used) cho bucket đã chọn."""
+    if bucket == "messaging":
+        v = extract_msg_started(r)
+        return (v, "messaging_conversation_started" if v>0 else "")
+    if bucket == "lead":
+        arr = r.get("actions")
+        if isinstance(arr, list):
+            total = 0.0; used = ""
+            for want in [k.lower() for k in RESULT_KEYS["lead"]]:
+                for it in arr:
+                    at = str(it.get("action_type","")).lower()
+                    if at == want or want in at:
+                        total += to_num(it.get("value"))
+                        used = want
+            if total > 0: return (int(round(total)), used)
+        return (0, "")
+    return (0, "")
 
 def extract_cpa_vnd_from_key(r: dict, rate: float, action_key: str, spend_vnd: float, result_count: int):
-    if action_key in ("__reach__","__impr__","clicks","inline_link_clicks",""):
-        return money0(spend_vnd / result_count) if result_count > 0 else ""
+    if action_key in ("",):
+        return ""
     arr = r.get("cost_per_action_type")
     if isinstance(arr, list):
         ak = action_key.lower()
@@ -346,77 +324,19 @@ def extract_cpa_vnd_from_key(r: dict, rate: float, action_key: str, spend_vnd: f
             at = str(it.get("action_type","")).lower()
             if at == ak or ak in at:
                 return money0(to_num(it.get("value")) * rate)
+    # fallback
     return money0(spend_vnd / result_count) if result_count > 0 else ""
 
-# ===== STRICT THEO OBJECTIVE/OPT_GOAL =====
-def strict_bucket_for_objective(objective: str, opt_goal: str):
-    """Chọn duy nhất 1 bucket theo objective/optimization_goal (ép cứng)."""
+def strict_bucket(objective: str, opt_goal: str):
+    """Chỉ 2 bucket hợp lệ: 'lead' hoặc 'messaging'. Các objective khác -> None (bỏ)."""
     O = str(objective or "").upper()
     G = str(opt_goal or "").upper()
-
-    # Lead campaign hoặc tối ưu lead
     if "LEAD" in O or "LEAD" in G:
         return "lead"
-
-    # Tin nhắn / hội thoại / engagement lấy 'bắt đầu trò chuyện'
-    if any(k in O for k in ["MESSAGE", "MESSAG", "CONVERSATION", "ENGAGEMENT"]) \
-       or any(k in G for k in ["MESSAGE", "MESSAG", "CONVERSATION"]):
+    if any(k in O for k in ["MESSAGE","MESSAG","CONVERSATION","ENGAGEMENT"]) \
+       or any(k in G for k in ["MESSAGE","MESSAG","CONVERSATION"]):
         return "messaging"
-
-    # Các trường hợp khác (giữ cho đầy đủ)
-    if "TRAFFIC" in O or "LINK_CLICK" in O:
-        return "link_click"
-    if "REACH" in O:
-        return "__reach__"
-    if "AWARENESS" in O or "BRAND" in O:
-        return "__impr__"
-    if any(k in O for k in ["SALE", "CONVERSION", "PURCHASE", "CATALOG"]):
-        return "purchase"
-
-    return None
-
-def extract_result_fixed_bucket(r: dict, bucket: str):
-    """Tính kết quả khi đã xác định bucket cần lấy (strict)."""
-    if bucket == "__reach__":
-        return int(to_num(r.get("reach"))), "__reach__"
-    if bucket == "__impr__":
-        return int(to_num(r.get("impressions"))), "__impr__"
-
-    # lấy từ actions
-    arr = r.get("actions")
-    pairs = []
-    if isinstance(arr, list):
-        pairs = [(str(it.get("action_type", "")).lower(), to_num(it.get("value"))) for it in arr]
-
-    total = 0.0
-    used = None
-    for want in [k.lower() for k in RESULT_KEYS.get(bucket, [])]:
-        for k, v in pairs:
-            if k == want or want in k:
-                total += v
-                used = want
-    if total > 0:
-        return int(round(total)), used
-
-    # Fallback theo bucket
-    if bucket == "link_click":
-        lk = int(to_num(r.get("inline_link_clicks")))
-        if lk > 0: return lk, "inline_link_clicks"
-    if bucket == "messaging":
-        ms = 0
-        # cố gắng đọc lại đúng trường messaging nếu FB không trả trực tiếp
-        arr2 = r.get("actions")
-        if isinstance(arr2, list):
-            for it in arr2:
-                at = str(it.get("action_type","")).lower()
-                if "messaging_conversation_started" in at or "messaging_first_reply" in at:
-                    ms += int(to_num(it.get("value")))
-        if ms <= 0:
-            # cuối cùng dùng helper
-            ms = extract_msg_started(r)
-        if ms > 0: return ms, "messaging_conversation_started"
-
-    return 0, ""
+    return None  # bỏ các objective khác
 
 # ========= MAPS & ROWS =========
 def build_maps_vnd(camps, sets, rate, divisor):
@@ -437,35 +357,16 @@ def build_maps_vnd(camps, sets, rate, divisor):
         }
     return camp_map, adset_map
 
-def extract_msg_started(r: dict) -> int:
-    arr = r.get("actions")
-    if not isinstance(arr, list): return 0
-    keys = [
-        "messaging_conversation_started","messaging_conversations_started","messaging_first_reply",
-        "onsite_conversion.messaging_first_reply",
-        "onsite_conversion.messaging_conversation_started_1d",
-        "onsite_conversion.messaging_conversation_started_7d",
-        "onsite_conversion.messaging_conversation_started_28d"
-    ]
-    for k in keys:
-        nd = k.lower()
-        for it in arr:
-            if str(it.get("action_type","")).lower() == nd:
-                try: return int(float(it.get("value",0)))
-                except: return 0
-    for k in keys:
-        nd = k.lower()
-        for it in arr:
-            if nd in str(it.get("action_type","")).lower():
-                try: return int(float(it.get("value",0)))
-                except: return 0
-    return 0
-
 def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
     out = []
     for r in ad_rows or []:
         s = adset_map.get(r.get("adset_id",""), {})
         c = camp_map.get(r.get("campaign_id",""), {})
+        # ==== chỉ giữ Lead / Messaging ====
+        bucket = strict_bucket(c.get("objective",""), s.get("opt_goal",""))
+        if not bucket:
+            continue  # bỏ dòng không thuộc 2 nhóm
+
         key = f"{r.get('adset_id','')}|{r.get('date_start','')}"
         adset_spend_vnd = adset_spend_map.get(key, "")
 
@@ -485,13 +386,8 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
         ctr_all_pct   = to_num(ctr_api) if (ctr_api not in (None,"")) else (pct2(clicks, impr) or "")
         ctr_click_pct = pct2(link, impr) or ""
 
-        # ==== ÉP bucket theo objective/optimization_goal ====
-        bucket = strict_bucket_for_objective(c.get("objective",""), s.get("opt_goal","") or s.get("optimization_goal",""))
-        if bucket:
-            result_count, result_key = extract_result_fixed_bucket(r, bucket)
-        else:
-            result_count, result_key = extract_result_using_objective(r, c.get("objective",""))
-
+        # Giá trị KẾT QUẢ theo bucket đã ép
+        result_count, result_key = extract_bucket_value(r, bucket)
         cpa_vnd = extract_cpa_vnd_from_key(r, rate, result_key, spend_vnd, result_count)
 
         out.append([
@@ -504,8 +400,8 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
             s.get("daily",""),
             adset_spend_vnd or "",
             r.get("ad_name",""),
-            extract_msg_started(r) or "",   # Lượt bắt đầu trò chuyện (cột riêng)
-            result_count or "",
+            extract_msg_started(r) or "",   # cột riêng cho messaging
+            result_count or "",             # === KẾT QUẢ (đã ép Lead hoặc Messaging) ===
             cpa_vnd or "",
             spend_vnd or "",
             cpc_click_vnd or "",
