@@ -285,7 +285,11 @@ RESULT_KEYS = {
         "onsite_conversion.messaging_conversation_started_7d",
         "onsite_conversion.messaging_conversation_started_28d",
     ],
-    "lead": ["leadgen","lead","onsite_conversion.lead","onsite_conversion.lead_grouped"],
+    # bổ sung đủ các biến thể lead để luôn bắt được
+    "lead": [
+        "leadgen","lead","onsite_conversion.lead","onsite_conversion.lead_grouped",
+        "offsite_conversion.fb_pixel_lead","omni_lead","on_facebook_lead"
+    ],
     "purchase": ["purchase","offsite_conversion.fb_pixel_purchase","omni_purchase","onsite_conversion.purchase"],
     "link_click": ["inline_link_click","link_click"],
 }
@@ -332,7 +336,6 @@ def extract_result_using_objective(r: dict, objective: str):
         return int(to_num(r.get("clicks"))), "clicks"
     return 0, ""
 
-
 def extract_cpa_vnd_from_key(r: dict, rate: float, action_key: str, spend_vnd: float, result_count: int):
     if action_key in ("__reach__","__impr__","clicks","inline_link_clicks",""):
         return money0(spend_vnd / result_count) if result_count > 0 else ""
@@ -344,6 +347,76 @@ def extract_cpa_vnd_from_key(r: dict, rate: float, action_key: str, spend_vnd: f
             if at == ak or ak in at:
                 return money0(to_num(it.get("value")) * rate)
     return money0(spend_vnd / result_count) if result_count > 0 else ""
+
+# ===== STRICT THEO OBJECTIVE/OPT_GOAL =====
+def strict_bucket_for_objective(objective: str, opt_goal: str):
+    """Chọn duy nhất 1 bucket theo objective/optimization_goal (ép cứng)."""
+    O = str(objective or "").upper()
+    G = str(opt_goal or "").upper()
+
+    # Lead campaign hoặc tối ưu lead
+    if "LEAD" in O or "LEAD" in G:
+        return "lead"
+
+    # Tin nhắn / hội thoại / engagement lấy 'bắt đầu trò chuyện'
+    if any(k in O for k in ["MESSAGE", "MESSAG", "CONVERSATION", "ENGAGEMENT"]) \
+       or any(k in G for k in ["MESSAGE", "MESSAG", "CONVERSATION"]):
+        return "messaging"
+
+    # Các trường hợp khác (giữ cho đầy đủ)
+    if "TRAFFIC" in O or "LINK_CLICK" in O:
+        return "link_click"
+    if "REACH" in O:
+        return "__reach__"
+    if "AWARENESS" in O or "BRAND" in O:
+        return "__impr__"
+    if any(k in O for k in ["SALE", "CONVERSION", "PURCHASE", "CATALOG"]):
+        return "purchase"
+
+    return None
+
+def extract_result_fixed_bucket(r: dict, bucket: str):
+    """Tính kết quả khi đã xác định bucket cần lấy (strict)."""
+    if bucket == "__reach__":
+        return int(to_num(r.get("reach"))), "__reach__"
+    if bucket == "__impr__":
+        return int(to_num(r.get("impressions"))), "__impr__"
+
+    # lấy từ actions
+    arr = r.get("actions")
+    pairs = []
+    if isinstance(arr, list):
+        pairs = [(str(it.get("action_type", "")).lower(), to_num(it.get("value"))) for it in arr]
+
+    total = 0.0
+    used = None
+    for want in [k.lower() for k in RESULT_KEYS.get(bucket, [])]:
+        for k, v in pairs:
+            if k == want or want in k:
+                total += v
+                used = want
+    if total > 0:
+        return int(round(total)), used
+
+    # Fallback theo bucket
+    if bucket == "link_click":
+        lk = int(to_num(r.get("inline_link_clicks")))
+        if lk > 0: return lk, "inline_link_clicks"
+    if bucket == "messaging":
+        ms = 0
+        # cố gắng đọc lại đúng trường messaging nếu FB không trả trực tiếp
+        arr2 = r.get("actions")
+        if isinstance(arr2, list):
+            for it in arr2:
+                at = str(it.get("action_type","")).lower()
+                if "messaging_conversation_started" in at or "messaging_first_reply" in at:
+                    ms += int(to_num(it.get("value")))
+        if ms <= 0:
+            # cuối cùng dùng helper
+            ms = extract_msg_started(r)
+        if ms > 0: return ms, "messaging_conversation_started"
+
+    return 0, ""
 
 # ========= MAPS & ROWS =========
 def build_maps_vnd(camps, sets, rate, divisor):
@@ -412,9 +485,13 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
         ctr_all_pct   = to_num(ctr_api) if (ctr_api not in (None,"")) else (pct2(clicks, impr) or "")
         ctr_click_pct = pct2(link, impr) or ""
 
-        msg_started = extract_msg_started(r)
-        objective = c.get("objective","")
-        result_count, result_key = extract_result_using_objective(r, objective)
+        # ==== ÉP bucket theo objective/optimization_goal ====
+        bucket = strict_bucket_for_objective(c.get("objective",""), s.get("opt_goal","") or s.get("optimization_goal",""))
+        if bucket:
+            result_count, result_key = extract_result_fixed_bucket(r, bucket)
+        else:
+            result_count, result_key = extract_result_using_objective(r, c.get("objective",""))
+
         cpa_vnd = extract_cpa_vnd_from_key(r, rate, result_key, spend_vnd, result_count)
 
         out.append([
@@ -427,7 +504,7 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
             s.get("daily",""),
             adset_spend_vnd or "",
             r.get("ad_name",""),
-            msg_started or "",
+            extract_msg_started(r) or "",   # Lượt bắt đầu trò chuyện (cột riêng)
             result_count or "",
             cpa_vnd or "",
             spend_vnd or "",
