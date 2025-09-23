@@ -21,12 +21,12 @@ HEADERS_VN = [
 ]
 
 # Nhịp & chống rate limit (có thể override bằng ENV)
-PACE_MS                 = int(float(os.environ.get("PACE_MS", 1500)))  # ms giữa 2 call
+PACE_MS                 = int(float(os.environ.get("PACE_MS", 1500)))
 RATE_LIMIT_RETRIES      = int(float(os.environ.get("RATE_LIMIT_RETRIES", 8)))
-RATE_LIMIT_COOLDOWN     = int(float(os.environ.get("RATE_LIMIT_COOLDOWN", 120)))  # giây
-PAGE_BURST              = int(float(os.environ.get("PAGE_BURST", 25)))  # sau mỗi N trang…
-PAGE_BURST_SLEEP        = int(float(os.environ.get("PAGE_BURST_SLEEP", 5)))  # …nghỉ bấy nhiêu giây
-ACCT_COOLDOWN           = int(float(os.environ.get("ACCT_COOLDOWN", 8)))  # nghỉ giữa các account
+RATE_LIMIT_COOLDOWN     = int(float(os.environ.get("RATE_LIMIT_COOLDOWN", 120)))
+PAGE_BURST              = int(float(os.environ.get("PAGE_BURST", 25)))
+PAGE_BURST_SLEEP        = int(float(os.environ.get("PAGE_BURST_SLEEP", 5)))
+ACCT_COOLDOWN           = int(float(os.environ.get("ACCT_COOLDOWN", 8)))
 RATE_LIMIT_ERR          = "RATE_LIMIT"
 DEBUG                   = os.environ.get("DEBUG","0") == "1"
 REPORT_TIME             = (os.environ.get("REPORT_TIME") or "conversion").strip().lower()  # "conversion"|"impression"
@@ -260,83 +260,60 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
             break
     return data
 
-# ========= RESULT (CHỈ Lead & Messaging) =========
-RESULT_KEYS = {
-    "messaging": [
-        "messaging_conversation_started","messaging_conversations_started","messaging_first_reply",
-        "onsite_conversion.messaging_first_reply",
-        "onsite_conversion.messaging_conversation_started_1d",
-        "onsite_conversion.messaging_conversation_started_7d",
-        "onsite_conversion.messaging_conversation_started_28d",
-    ],
-    "lead": [
-        "leadgen","lead","onsite_conversion.lead","onsite_conversion.lead_grouped",
-        "offsite_conversion.fb_pixel_lead","omni_lead","on_facebook_lead"
-    ],
-}
+# ========= RESULT (ÉP THEO OBJECTIVE) =========
+LEAD_KEYS = [
+    "lead","leadgen","onsite_conversion.lead","onsite_conversion.lead_grouped"
+]
+MSG_KEYS = [
+    "messaging_conversation_started","messaging_conversations_started","messaging_first_reply",
+    "onsite_conversion.messaging_first_reply",
+    "onsite_conversion.messaging_conversation_started_1d",
+    "onsite_conversion.messaging_conversation_started_7d",
+    "onsite_conversion.messaging_conversation_started_28d",
+]
 
-def extract_msg_started(r: dict) -> int:
+def _pairs_from_actions(r: dict):
     arr = r.get("actions")
-    if not isinstance(arr, list): return 0
-    keys = RESULT_KEYS["messaging"]
-    # match exact trước
-    for k in keys:
-        nd = k.lower()
-        for it in arr:
-            if str(it.get("action_type","")).lower() == nd:
-                try: return int(float(it.get("value",0)))
-                except: return 0
-    # rồi tới contains
-    for k in keys:
-        nd = k.lower()
-        for it in arr:
-            if nd in str(it.get("action_type","")).lower():
-                try: return int(float(it.get("value",0)))
-                except: return 0
-    return 0
+    if not isinstance(arr, list): return []
+    out = []
+    for it in arr:
+        try:
+            out.append((str(it.get("action_type","")).lower(), to_num(it.get("value"))))
+        except:  # phòng rỗng/None
+            pass
+    return out
 
-def extract_bucket_value(r: dict, bucket: str) -> (int, str):
-    """Trả (result_count, action_key_used) cho bucket đã chọn."""
-    if bucket == "messaging":
-        v = extract_msg_started(r)
-        return (v, "messaging_conversation_started" if v>0 else "")
-    if bucket == "lead":
-        arr = r.get("actions")
-        if isinstance(arr, list):
-            total = 0.0; used = ""
-            for want in [k.lower() for k in RESULT_KEYS["lead"]]:
-                for it in arr:
-                    at = str(it.get("action_type","")).lower()
-                    if at == want or want in at:
-                        total += to_num(it.get("value"))
-                        used = want
-            if total > 0: return (int(round(total)), used)
-        return (0, "")
-    return (0, "")
+def _count_actions_by_keys(r: dict, keys: List[str]) -> int:
+    pairs = _pairs_from_actions(r)
+    if not pairs: return 0
+    want = [k.lower() for k in keys]
+    total = 0.0
+    for w in want:
+        for k, v in pairs:
+            if k == w or w in k:   # chấp nhận chứa chuỗi
+                total += v
+    return int(round(total)) if total > 0 else 0
 
-def extract_cpa_vnd_from_key(r: dict, rate: float, action_key: str, spend_vnd: float, result_count: int):
-    if action_key in ("",):
-        return ""
+def _cpa_from_cost_per_action(r: dict, rate: float, keys: List[str], fallback_spend_vnd: float, result_cnt: int):
+    if result_cnt <= 0: return ""
     arr = r.get("cost_per_action_type")
     if isinstance(arr, list):
-        ak = action_key.lower()
+        want = [k.lower() for k in keys]
         for it in arr:
             at = str(it.get("action_type","")).lower()
-            if at == ak or ak in at:
-                return money0(to_num(it.get("value")) * rate)
-    # fallback
-    return money0(spend_vnd / result_count) if result_count > 0 else ""
+            val = to_num(it.get("value"))
+            for w in want:
+                if at == w or w in at:
+                    return money0(val * rate)
+    # fallback: spend / result
+    return money0(fallback_spend_vnd / result_cnt) if result_cnt > 0 else ""
 
-def strict_bucket(objective: str, opt_goal: str):
-    """Chỉ 2 bucket hợp lệ: 'lead' hoặc 'messaging'. Các objective khác -> None (bỏ)."""
-    O = str(objective or "").upper()
-    G = str(opt_goal or "").upper()
-    if "LEAD" in O or "LEAD" in G:
-        return "lead"
-    if any(k in O for k in ["MESSAGE","MESSAG","CONVERSATION","ENGAGEMENT"]) \
-       or any(k in G for k in ["MESSAGE","MESSAG","CONVERSATION"]):
-        return "messaging"
-    return None  # bỏ các objective khác
+def _bucket_from_objective(obj: str) -> str:
+    o = (obj or "").upper()
+    if "LEAD" in o:          return "LEAD"
+    if "MESSAGE" in o:       return "MSG"
+    if "ENGAGEMENT" in o:    return "MSG"   # theo yêu cầu: Tin nhắn / Tương tác → dùng MSG
+    return "SKIP"
 
 # ========= MAPS & ROWS =========
 def build_maps_vnd(camps, sets, rate, divisor):
@@ -357,16 +334,14 @@ def build_maps_vnd(camps, sets, rate, divisor):
         }
     return camp_map, adset_map
 
+def extract_msg_started(r: dict) -> int:
+    return _count_actions_by_keys(r, MSG_KEYS)
+
 def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
     out = []
     for r in ad_rows or []:
         s = adset_map.get(r.get("adset_id",""), {})
         c = camp_map.get(r.get("campaign_id",""), {})
-        # ==== chỉ giữ Lead / Messaging ====
-        bucket = strict_bucket(c.get("objective",""), s.get("opt_goal",""))
-        if not bucket:
-            continue  # bỏ dòng không thuộc 2 nhóm
-
         key = f"{r.get('adset_id','')}|{r.get('date_start','')}"
         adset_spend_vnd = adset_spend_map.get(key, "")
 
@@ -386,9 +361,19 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
         ctr_all_pct   = to_num(ctr_api) if (ctr_api not in (None,"")) else (pct2(clicks, impr) or "")
         ctr_click_pct = pct2(link, impr) or ""
 
-        # Giá trị KẾT QUẢ theo bucket đã ép
-        result_count, result_key = extract_bucket_value(r, bucket)
-        cpa_vnd = extract_cpa_vnd_from_key(r, rate, result_key, spend_vnd, result_count)
+        # ====== ÉP KẾT QUẢ THEO OBJECTIVE ======
+        bucket = _bucket_from_objective(c.get("objective",""))
+        if bucket == "LEAD":
+            result_count = _count_actions_by_keys(r, LEAD_KEYS)
+            cpa_vnd      = _cpa_from_cost_per_action(r, rate, LEAD_KEYS, spend_vnd, result_count)
+        elif bucket == "MSG":
+            result_count = _count_actions_by_keys(r, MSG_KEYS)
+            cpa_vnd      = _cpa_from_cost_per_action(r, rate, MSG_KEYS, spend_vnd, result_count)
+        else:
+            result_count = ""
+            cpa_vnd      = ""
+
+        msg_started = extract_msg_started(r)  # vẫn điền riêng ở cột "LƯỢT BẮT ĐẦU TRÒ CHUYỆN"
 
         out.append([
             r.get("date_start",""),
@@ -400,8 +385,8 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
             s.get("daily",""),
             adset_spend_vnd or "",
             r.get("ad_name",""),
-            extract_msg_started(r) or "",   # cột riêng cho messaging
-            result_count or "",             # === KẾT QUẢ (đã ép Lead hoặc Messaging) ===
+            msg_started or "",
+            result_count or "",
             cpa_vnd or "",
             spend_vnd or "",
             cpc_click_vnd or "",
