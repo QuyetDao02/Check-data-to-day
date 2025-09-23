@@ -3,7 +3,7 @@ name: FB CSV Export (no GCP)
 on:
   workflow_dispatch:
   # schedule:
-  #   - cron: "0 * * * *"   # mỗi giờ
+  #   - cron: "0 * * * *"
 
 permissions:
   contents: write
@@ -17,17 +17,7 @@ jobs:
       API_SHEET_NAME: api
       API_SHEET_GID: "1875921302"
       META_TOKEN: "EAAWFqwe8nikBPvDMxZAb4xjdTqiGkPWTB54LargH3igyQbuZCKlHZCsNPjqun1uq7H1D75enYTBxwgZCfPfTeX7UPh00xtvAZAwZCyCIwmWjTLatf84HoTwWwMPsVVQbv8SAwBxRRnUd3upIikBNlkwvjcVzBms97w8HqN6IA3SFmSVEPHxgR84ZBOuAZATUiWQE"
-      DEBUG: "0"                 # "1" để soi log
-      # === Cấu hình chia nhỏ & nhịp ===
-      WINDOW_DAYS: "1"           # 1 ngày/ cửa sổ (hiển thị theo ngày rõ ràng)
-      WINDOW_COOLDOWN: "5"       # nghỉ giữa 2 cửa sổ (giây)
-      ACCT_COOLDOWN: "8"         # nghỉ giữa các account (giây)
-      PACE_MS: "1500"            # ms giữa 2 call API
-      RATE_LIMIT_RETRIES: "8"
-      RATE_LIMIT_COOLDOWN: "120" # giây nếu dính rate-limit
-      PAGE_BURST: "25"
-      PAGE_BURST_SLEEP: "5"
-      REPORT_TIME: "conversion"  # hoặc "impression"
+      DEBUG: "0"   # đổi "1" nếu cần soi log cấu hình/ lỗi FB
 
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +30,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      # Tuỳ chọn: soi nhanh CSV từ Sheet
+      - name: Quick check Google Sheet CSV (optional)
+        if: env.DEBUG == '1'
+        run: |
+          echo "D2:D4 ->"
+          curl -s "https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${API_SHEET_NAME}&range=D2:D4" || true
+          echo
+          echo "G2:H ->"
+          curl -s "https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${API_SHEET_NAME}&range=G2:H" || true
+          echo
 
       - name: Run exporter
         run: python -u main.py
