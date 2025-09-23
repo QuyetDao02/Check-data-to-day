@@ -20,11 +20,16 @@ HEADERS_VN = [
     "LƯỢT HIỂN THỊ (QC)","NGƯỜI TIẾP CẬN (QC)"
 ]
 
-PACE_MS            = 800
-RATE_LIMIT_RETRIES = 4
-RATE_LIMIT_ERR     = "RATE_LIMIT"
-DEBUG              = os.environ.get("DEBUG","0") == "1"
-REPORT_TIME        = (os.environ.get("REPORT_TIME") or "conversion").strip().lower()  # "conversion" | "impression"
+# Nhịp & chống rate limit (có thể override bằng ENV)
+PACE_MS                 = int(float(os.environ.get("PACE_MS", 1500)))  # ms giữa 2 call
+RATE_LIMIT_RETRIES      = int(float(os.environ.get("RATE_LIMIT_RETRIES", 8)))
+RATE_LIMIT_COOLDOWN     = int(float(os.environ.get("RATE_LIMIT_COOLDOWN", 120)))  # giây
+PAGE_BURST              = int(float(os.environ.get("PAGE_BURST", 25)))  # sau mỗi N trang…
+PAGE_BURST_SLEEP        = int(float(os.environ.get("PAGE_BURST_SLEEP", 5)))  # …nghỉ bấy nhiêu giây
+ACCT_COOLDOWN           = int(float(os.environ.get("ACCT_COOLDOWN", 8)))  # nghỉ giữa các account
+RATE_LIMIT_ERR          = "RATE_LIMIT"
+DEBUG                   = os.environ.get("DEBUG","0") == "1"
+REPORT_TIME             = (os.environ.get("REPORT_TIME") or "conversion").strip().lower()  # "conversion"|"impression"
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("fb-export")
@@ -93,7 +98,7 @@ def with_token(url: str, token: str) -> str:
 
 def fb_get(url: str, token: str, try_count=0):
     pace()
-    MAX_TRIES = 8
+    MAX_TRIES = max(RATE_LIMIT_RETRIES, 3)
     backoff = min(1.2*(1.8**try_count) + random.random()*0.7, 25.0)
     r = requests.get(with_token(url, token), timeout=60)
     code = r.status_code
@@ -103,34 +108,49 @@ def fb_get(url: str, token: str, try_count=0):
     err_json = None
     try: err_json = r.json()
     except: pass
-
     if DEBUG:
         short = url.split("?")[0]
         print(f"[FB_ERR] HTTP {code} @ {short}")
-        if err_json: print("[FB_ERR_BODY]", err_json)
-        else: print("[FB_ERR_TEXT]", r.text[:500])
+        print("[FB_ERR_BODY]" if err_json else "[FB_ERR_TEXT]", (err_json or r.text[:500]))
 
     err = (err_json or {}).get("error", {})
 
-    if code == 403 and (err.get("code")==4 or err.get("is_transient") is True):
-        if try_count < RATE_LIMIT_RETRIES:
+    # coi là rate-limit: 429, code 4/613, is_transient
+    if code == 429 or str(err.get("code")) in {"4","613"} or err.get("is_transient"):
+        if try_count < MAX_TRIES:
             time.sleep(backoff); return fb_get(url, token, try_count+1)
         raise RuntimeError(RATE_LIMIT_ERR)
 
-    if (code == 400 and str(err.get("code"))=="17") or code == 429 or code >= 500:
+    # lỗi tạm thời
+    if (code == 400 and str(err.get("code"))=="17") or code >= 500:
         if try_count < MAX_TRIES:
             time.sleep(backoff); return fb_get(url, token, try_count+1)
         raise RuntimeError(f"HTTP {code} after retries: {r.text}")
 
     raise RuntimeError(f"HTTP {code}: {r.text}")
 
+def fb_get_safely(url: str, token: str):
+    """Nếu dính RATE_LIMIT thì cooldown dài rồi lặp lại cùng URL."""
+    while True:
+        try:
+            return fb_get(url, token)
+        except RuntimeError as e:
+            if str(e) == RATE_LIMIT_ERR:
+                sleep_s = RATE_LIMIT_COOLDOWN + random.randint(3, 12)
+                if DEBUG: print(f"[COOLDOWN] rate-limit, sleep {sleep_s}s")
+                time.sleep(sleep_s)
+                continue
+            raise
+
 def fb_paged(url_no_token: str, token: str) -> List[dict]:
     out = []; url = url_no_token; guard = 0
     while url:
-        j = fb_get(url, token)
+        j = fb_get_safely(url, token)
         out.extend(j.get("data",[]) or [])
         url = j.get("paging",{}).get("next")
         guard += 1
+        if guard % PAGE_BURST == 0:
+            time.sleep(PAGE_BURST_SLEEP)
         if guard > 10000: raise RuntimeError("Paging overflow.")
     return out
 
@@ -138,7 +158,7 @@ def fb_paged(url_no_token: str, token: str) -> List[dict]:
 def fetch_account_meta(act_id: str, token: str) -> dict:
     url = f"https://graph.facebook.com/{FB_API_VERSION}/{requests.utils.quote(act_id)}?fields=name,currency"
     try:
-        j = fb_get(url, token)
+        j = fb_get_safely(url, token)
         return {"name": j.get("name",""), "currency": j.get("currency","VND")}
     except Exception as e:
         if str(e)==RATE_LIMIT_ERR: raise
@@ -147,7 +167,6 @@ def fetch_account_meta(act_id: str, token: str) -> dict:
 def fetch_campaigns_and_adsets(act_id: str, token: str):
     base = f"https://graph.facebook.com/{FB_API_VERSION}"
     act = requests.utils.quote(act_id)
-    # Lấy thêm objective và attribution_spec để map đúng "Kết quả"
     camps = fb_paged(
         f"{base}/{act}/campaigns?fields=id,name,objective,daily_budget,lifetime_budget&limit=500",
         token
@@ -171,18 +190,20 @@ def fetch_adset_spend_map_vnd(act_id: str, since: str, until: str, rate: float, 
     url = f"{base}?{q}"
     out = {}; guard = 0
     while url:
-        j = fb_get(url, token)
+        j = fb_get_safely(url, token)
         for row in j.get("data",[]) or []:
             key = f"{row.get('adset_id','')}|{row.get('date_start','')}"
             vnd = money0((float(row.get("spend",0)) if row.get("spend") else 0.0) * rate)
             out[key] = vnd
         url = j.get("paging",{}).get("next")
         guard += 1
+        if guard % PAGE_BURST == 0:
+            time.sleep(PAGE_BURST_SLEEP)
         if guard > 10000: raise RuntimeError("Paging overflow (adset spend).")
     return out
 
 def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[dict]:
-    """Gọi insights với unified attribution + 2 fallback để né 'Invalid parameter'."""
+    """Insights có unified attribution + fallback; mỗi trang có burst-sleep."""
     act = requests.utils.quote(act_id)
     base = f"https://graph.facebook.com/{FB_API_VERSION}/{act}/insights"
 
@@ -197,8 +218,7 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
     def build_url(mode: str) -> str:
         fields = base_fields.copy()
         params = {
-            "level":"ad",
-            "limit":"500",
+            "level":"ad","limit":"500",
             "time_range": json.dumps({"since":since,"until":until}),
             "time_increment":"1",
             "use_unified_attribution_setting":"true",
@@ -211,7 +231,7 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
         q = "&".join([f"{k}={requests.utils.quote(str(v))}" for k,v in params.items()])
         return f"{base}?{q}"
 
-    modes = ["full","plain","basic"]  # full: có actions + report_time, plain: có actions, basic: không actions
+    modes = ["full","plain","basic"]
     data: List[dict] = []
 
     for mode in modes:
@@ -221,7 +241,7 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
         out = []; guard = 0
         while url:
             try:
-                j = fb_get(url, token)
+                j = fb_get_safely(url, token)
             except RuntimeError as e:
                 msg = str(e)
                 if ("Invalid parameter" in msg) or ("\"code\":100" in msg) or ("error_subcode\":1504018" in msg):
@@ -231,6 +251,8 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
             out.extend(j.get("data",[]) or [])
             url = j.get("paging",{}).get("next")
             guard += 1
+            if guard % PAGE_BURST == 0:
+                time.sleep(PAGE_BURST_SLEEP)
             if guard > 10000: raise RuntimeError("Paging overflow.")
         if out:
             data = out
@@ -249,7 +271,6 @@ def priority_for_objective(objective: str):
         return ["purchase", "lead", "link_click", "messaging"]
     if "TRAFFIC" in o or "LINK_CLICK" in o:
         return ["link_click", "lead", "purchase", "messaging"]
-    # awareness/reach – không có action: dùng reach/impressions
     if "REACH" in o:
         return ["__reach__", "link_click"]
     if "AWARENESS" in o or "BRAND" in o:
@@ -270,14 +291,11 @@ RESULT_KEYS = {
 }
 
 def extract_result_using_objective(r: dict, objective: str):
-    # pseudo keys: "__reach__", "__impr__"
     pr = priority_for_objective(objective)
     if "__reach__" in pr:
-        v = int(to_num(r.get("reach")))
-        if v > 0: return v, "__reach__"
+        v = int(to_num(r.get("reach")));        if v > 0: return v, "__reach__"
     if "__impr__" in pr:
-        v = int(to_num(r.get("impressions")))
-        if v > 0: return v, "__impr__"
+        v = int(to_num(r.get("impressions")));  if v > 0: return v, "__impr__"
 
     arr = r.get("actions")
     pairs = []
@@ -296,7 +314,6 @@ def extract_result_using_objective(r: dict, objective: str):
         if total > 0:
             return int(round(total)), used
 
-    # Fallbacks
     if to_num(r.get("inline_link_clicks")) > 0:
         return int(to_num(r.get("inline_link_clicks"))), "inline_link_clicks"
     if to_num(r.get("clicks")) > 0:
@@ -382,10 +399,7 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
         ctr_all_pct   = to_num(ctr_api) if (ctr_api not in (None,"")) else (pct2(clicks, impr) or "")
         ctr_click_pct = pct2(link, impr) or ""
 
-        # (A) LƯỢT BẮT ĐẦU TRÒ CHUYỆN
         msg_started = extract_msg_started(r)
-
-        # (B) KẾT QUẢ & CPA theo objective
         objective = c.get("objective","")
         result_count, result_key = extract_result_using_objective(r, objective)
         cpa_vnd = extract_cpa_vnd_from_key(r, rate, result_key, spend_vnd, result_count)
@@ -572,7 +586,9 @@ def run_once():
         raise SystemExit(1)
 
     all_rows: List[List] = []
-    for act in cfg["accounts"]:
+    for idx, act in enumerate(cfg["accounts"]):
+        if idx > 0:
+            time.sleep(ACCT_COOLDOWN)  # xả quota giữa các account
         meta = fetch_account_meta(act, token)
         cur  = (meta.get("currency") or "VND").upper()
         rate = 1.0 if cur=="VND" else float(cfg["fx"].get(cur, 0))
