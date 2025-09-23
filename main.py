@@ -2,6 +2,7 @@
 import os, io, json, time, math, random, datetime, csv, logging
 from typing import List
 import requests, yaml, pathlib
+from datetime import date, timedelta
 
 # ========= PATHS =========
 ROOT        = pathlib.Path(__file__).resolve().parent
@@ -27,6 +28,9 @@ RATE_LIMIT_COOLDOWN     = int(float(os.environ.get("RATE_LIMIT_COOLDOWN", 120)))
 PAGE_BURST              = int(float(os.environ.get("PAGE_BURST", 25)))  # sau mỗi N trang…
 PAGE_BURST_SLEEP        = int(float(os.environ.get("PAGE_BURST_SLEEP", 5)))  # …nghỉ bấy nhiêu giây
 ACCT_COOLDOWN           = int(float(os.environ.get("ACCT_COOLDOWN", 8)))  # nghỉ giữa các account
+# Cửa sổ ngày
+WINDOW_DAYS             = int(float(os.environ.get("WINDOW_DAYS", 1)))
+WINDOW_COOLDOWN         = int(float(os.environ.get("WINDOW_COOLDOWN", 5)))
 RATE_LIMIT_ERR          = "RATE_LIMIT"
 DEBUG                   = os.environ.get("DEBUG","0") == "1"
 REPORT_TIME             = (os.environ.get("REPORT_TIME") or "conversion").strip().lower()  # "conversion"|"impression"
@@ -41,6 +45,17 @@ def emit_error_csv(msg: str):
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
         f.write("ERROR\n")
         f.write((msg or "").strip() + "\n")
+
+# ========= CSV APPEND HELPERS =========
+def write_csv_header():
+    CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(HEADERS_VN)
+
+def append_csv(rows: List[List]):
+    if not rows: return
+    with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerows(rows)
 
 # ========= UTILS =========
 def _env_int(name: str, default: int) -> int:
@@ -332,7 +347,6 @@ def extract_result_using_objective(r: dict, objective: str):
         return int(to_num(r.get("clicks"))), "clicks"
     return 0, ""
 
-
 def extract_cpa_vnd_from_key(r: dict, rate: float, action_key: str, spend_vnd: float, result_count: int):
     if action_key in ("__reach__","__impr__","clicks","inline_link_clicks",""):
         return money0(spend_vnd / result_count) if result_count > 0 else ""
@@ -440,6 +454,17 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
             r.get("reach","") or ""
         ])
     return out
+
+# ========= DATE WINDOWS =========
+def iter_date_windows(since_iso: str, until_iso: str, win_days: int):
+    s = date.fromisoformat(since_iso)
+    u = date.fromisoformat(until_iso)
+    step = max(int(win_days), 1)
+    d = s
+    while d <= u:
+        e = min(d + timedelta(days=step-1), u)
+        yield d.isoformat(), e.isoformat()
+        d = e + timedelta(days=1)
 
 # ========= SHEET LOADING =========
 def to_ymd_any(val: str) -> str:
@@ -582,14 +607,6 @@ def load_config_or_fail() -> dict:
     return load_from_config_file_or_fail()
 
 # ========= MAIN =========
-def write_full_csv(rows: List[List]):
-    CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(HEADERS_VN)
-        if rows:
-            w.writerows(rows)
-
 def run_once():
     cfg = load_config_or_fail()
 
@@ -598,29 +615,39 @@ def run_once():
         emit_error_csv("Thiếu META_TOKEN trong workflow (sync.yml).")
         raise SystemExit(1)
 
-    all_rows: List[List] = []
+    # 1) Prefetch meta/budget cho từng account (một lần)
+    acct_ctx = {}
     for idx, act in enumerate(cfg["accounts"]):
-        if idx > 0:
-            time.sleep(ACCT_COOLDOWN)  # xả quota giữa các account
+        if idx > 0 and ACCT_COOLDOWN:
+            time.sleep(ACCT_COOLDOWN)
         meta = fetch_account_meta(act, token)
         cur  = (meta.get("currency") or "VND").upper()
-        rate = 1.0 if cur=="VND" else float(cfg["fx"].get(cur, 0))
-        if cur!="VND" and (not rate or rate <= 0):
-            emit_error_csv(f"Thiếu tỷ giá VND cho {cur} (cột G:H).")
-            raise SystemExit(1)
+        rate = 1.0 if cur=="VND" else float(cfg["fx"].get(cur, 0) or 0)
+        if cur!="VND" and rate <= 0:
+            emit_error_csv(f"Thiếu tỷ giá VND cho {cur} (cột G:H)."); raise SystemExit(1)
         divisor = minor_unit_divisor(cur)
 
         meta_sets = fetch_campaigns_and_adsets(act, token)
         camp_map, adset_map = build_maps_vnd(meta_sets["campaigns"], meta_sets["adsets"], rate, divisor)
+        acct_ctx[act] = {"name": meta["name"], "rate": rate, "camp_map": camp_map, "adset_map": adset_map}
 
-        adset_spend = fetch_adset_spend_map_vnd(act, cfg["since"], cfg["until"], rate, token)
-        ads = fetch_insights_ad(act, cfg["since"], cfg["until"], token)
+    # 2) Ghi header, rồi append theo từng cửa sổ ngày
+    write_csv_header()
 
-        rows = map_rows(ads, adset_map, camp_map, adset_spend, meta["name"], rate)
-        all_rows.extend(rows)
+    for win_since, win_until in iter_date_windows(cfg["since"], cfg["until"], WINDOW_DAYS):
+        if DEBUG: print(f"[WINDOW] {win_since} → {win_until}")
+        for ai, act in enumerate(cfg["accounts"]):
+            ctx = acct_ctx[act]
+            adset_spend = fetch_adset_spend_map_vnd(act, win_since, win_until, ctx["rate"], token)
+            ads = fetch_insights_ad(act, win_since, win_until, token)
+            rows = map_rows(ads, ctx["adset_map"], ctx["camp_map"], adset_spend, ctx["name"], ctx["rate"])
+            append_csv(rows)
+            if ai > 0 and ACCT_COOLDOWN:
+                time.sleep(ACCT_COOLDOWN)
+        if WINDOW_COOLDOWN:
+            time.sleep(WINDOW_COOLDOWN)
 
-    write_full_csv(all_rows)
-    print(json.dumps({"status":"done","rows":len(all_rows)}, ensure_ascii=False))
+    print(json.dumps({"status":"done"}, ensure_ascii=False))
 
 if __name__ == "__main__":
     try:
