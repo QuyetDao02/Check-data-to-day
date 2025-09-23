@@ -292,33 +292,46 @@ RESULT_KEYS = {
 
 def extract_result_using_objective(r: dict, objective: str):
     pr = priority_for_objective(objective)
-    if "__reach__" in pr:
-        v = int(to_num(r.get("reach")));        if v > 0: return v, "__reach__"
-    if "__impr__" in pr:
-        v = int(to_num(r.get("impressions")));  if v > 0: return v, "__impr__"
 
+    # Ưu tiên reach/impressions cho các objective nhận diện/tiếp cận
+    if "__reach__" in pr:
+        v = int(to_num(r.get("reach")))
+        if v > 0:
+            return v, "__reach__"
+
+    if "__impr__" in pr:
+        v = int(to_num(r.get("impressions")))
+        if v > 0:
+            return v, "__impr__"
+
+    # Chuẩn bị cặp (action_type, value) từ trường actions
     arr = r.get("actions")
     pairs = []
     if isinstance(arr, list):
-        pairs = [(str(it.get("action_type","")).lower(), to_num(it.get("value"))) for it in arr]
+        pairs = [(str(it.get("action_type", "")).lower(), to_num(it.get("value"))) for it in arr]
 
+    # Duyệt theo thứ tự ưu tiên của objective
     for bucket in pr:
-        if bucket.startswith("__"):  # handled above
+        if bucket.startswith("__"):
             continue
         keys = [k.lower() for k in RESULT_KEYS[bucket]]
-        total = 0.0; used = None
+        total = 0.0
+        used = None
         for want in keys:
-            for k,v in pairs:
+            for k, v in pairs:
                 if k == want or want in k:
-                    total += v; used = want
+                    total += v
+                    used = want
         if total > 0:
             return int(round(total)), used
 
+    # Fallback
     if to_num(r.get("inline_link_clicks")) > 0:
         return int(to_num(r.get("inline_link_clicks"))), "inline_link_clicks"
     if to_num(r.get("clicks")) > 0:
         return int(to_num(r.get("clicks"))), "clicks"
     return 0, ""
+
 
 def extract_cpa_vnd_from_key(r: dict, rate: float, action_key: str, spend_vnd: float, result_count: int):
     if action_key in ("__reach__","__impr__","clicks","inline_link_clicks",""):
