@@ -2,8 +2,8 @@ name: FB CSV Export (no GCP)
 
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: "0 * * * *"
+  schedule:
+    - cron: "*/10 * * * *"
 
 permissions:
   contents: write
