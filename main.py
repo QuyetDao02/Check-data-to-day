@@ -442,7 +442,7 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
             adset_spend_vnd or "",
             r.get("ad_name",""),
             msg_started or "",
-            result_count or "",
+            leads or "",
             cpa_vnd or "",
             spend_vnd or "",
             cpc_click_vnd or "",
