@@ -3,7 +3,7 @@ name: FB CSV Export (no GCP)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/20 * * * *"
 
 permissions:
   contents: write
@@ -16,7 +16,7 @@ jobs:
       SHEET_ID: 1jkdkGG2A8JS2GE728CwvkeVRFNXG7-28TN9GbXo1SYY
       API_SHEET_NAME: api
       API_SHEET_GID: "1875921302"
-      META_TOKEN: "EAAWFqwe8nikBPnIz1gbvhogzFXoBsnpgyoCLqckDfNfZCzZACqlYPJrUNZBTKy2uSPPi4epXwdMN8fJgPe8fscXDxemflEWydFtnXZBRG6e8u2nPZBYOloXc0rpQHVBJkOAfsaezzCoC88qta2mFD7IEKI389Qd7KB6em02ZCJ86kQQykhtZAhmOX8ZCCXQ1oTim"
+      META_TOKEN: "EAAWFqwe8nikBPq36O9EvjXyCCxndykoG3P7xkLJ41iMMhelmZBHct5HAmPz9RAb7RJeYjAVZCxdDpdfUQQZBSCtsDFM6LT1lLMyohsQGQfhRMHfLOyFPoFxgwFcV9LeIGqx9dlxccZADdYVK3nC649puZCUHFT8MCM3ZAfYI1HKqz1HuPavSl98TvPZCjm1SU5B"
       DEBUG: "0"   # đổi "1" nếu cần soi log cấu hình/ lỗi FB
 
     steps:
