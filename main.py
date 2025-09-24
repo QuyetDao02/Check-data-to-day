@@ -115,13 +115,11 @@ def fb_get(url: str, token: str, try_count=0):
 
     err = (err_json or {}).get("error", {})
 
-    # coi là rate-limit: 429, code 4/613, is_transient
     if code == 429 or str(err.get("code")) in {"4","613"} or err.get("is_transient"):
         if try_count < MAX_TRIES:
             time.sleep(backoff); return fb_get(url, token, try_count+1)
         raise RuntimeError(RATE_LIMIT_ERR)
 
-    # lỗi tạm thời
     if (code == 400 and str(err.get("code"))=="17") or code >= 500:
         if try_count < MAX_TRIES:
             time.sleep(backoff); return fb_get(url, token, try_count+1)
@@ -130,7 +128,6 @@ def fb_get(url: str, token: str, try_count=0):
     raise RuntimeError(f"HTTP {code}: {r.text}")
 
 def fb_get_safely(url: str, token: str):
-    """Nếu dính RATE_LIMIT thì cooldown dài rồi lặp lại cùng URL."""
     while True:
         try:
             return fb_get(url, token)
@@ -203,7 +200,6 @@ def fetch_adset_spend_map_vnd(act_id: str, since: str, until: str, rate: float, 
     return out
 
 def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[dict]:
-    """Insights có unified attribution + fallback; mỗi trang có burst-sleep."""
     act = requests.utils.quote(act_id)
     base = f"https://graph.facebook.com/{FB_API_VERSION}/{act}/insights"
 
@@ -233,11 +229,8 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
 
     modes = ["full","plain","basic"]
     data: List[dict] = []
-
     for mode in modes:
         url = build_url(mode) if mode!="basic" else build_url("plain").replace(",".join(action_fields), "")
-        if DEBUG: print(f"[INSIGHTS] try mode={mode}")
-
         out = []; guard = 0
         while url:
             try:
@@ -245,7 +238,6 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
             except RuntimeError as e:
                 msg = str(e)
                 if ("Invalid parameter" in msg) or ("\"code\":100" in msg) or ("error_subcode\":1504018" in msg):
-                    if DEBUG: print(f"[INSIGHTS] mode={mode} invalid -> fallback")
                     out = []; url = None; break
                 raise
             out.extend(j.get("data",[]) or [])
@@ -256,13 +248,12 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
             if guard > 10000: raise RuntimeError("Paging overflow.")
         if out:
             data = out
-            if DEBUG: print(f"[INSIGHTS] success mode={mode}, rows={len(data)}")
             break
     return data
 
-# ========= RESULT (ÉP THEO OBJECTIVE) =========
+# ========= RESULT: CHỈ LEAD =========
 LEAD_KEYS = [
-    "lead","leadgen","onsite_conversion.lead","onsite_conversion.lead_grouped"
+    "lead","leadgen","onsite_conversion.lead","onsite_conversion.lead_grouped",
 ]
 MSG_KEYS = [
     "messaging_conversation_started","messaging_conversations_started","messaging_first_reply",
@@ -279,7 +270,7 @@ def _pairs_from_actions(r: dict):
     for it in arr:
         try:
             out.append((str(it.get("action_type","")).lower(), to_num(it.get("value"))))
-        except:  # phòng rỗng/None
+        except:
             pass
     return out
 
@@ -290,11 +281,11 @@ def _count_actions_by_keys(r: dict, keys: List[str]) -> int:
     total = 0.0
     for w in want:
         for k, v in pairs:
-            if k == w or w in k:   # chấp nhận chứa chuỗi
+            if k == w or w in k:
                 total += v
     return int(round(total)) if total > 0 else 0
 
-def _cpa_from_cost_per_action(r: dict, rate: float, keys: List[str], fallback_spend_vnd: float, result_cnt: int):
+def _cpa_from_cost_per_action(r: dict, rate: float, keys: List[str], spend_vnd: float, result_cnt: int):
     if result_cnt <= 0: return ""
     arr = r.get("cost_per_action_type")
     if isinstance(arr, list):
@@ -305,15 +296,10 @@ def _cpa_from_cost_per_action(r: dict, rate: float, keys: List[str], fallback_sp
             for w in want:
                 if at == w or w in at:
                     return money0(val * rate)
-    # fallback: spend / result
-    return money0(fallback_spend_vnd / result_cnt) if result_cnt > 0 else ""
+    return money0(spend_vnd / result_cnt) if result_cnt > 0 else ""
 
-def _bucket_from_objective(obj: str) -> str:
-    o = (obj or "").upper()
-    if "LEAD" in o:          return "LEAD"
-    if "MESSAGE" in o:       return "MSG"
-    if "ENGAGEMENT" in o:    return "MSG"   # theo yêu cầu: Tin nhắn / Tương tác → dùng MSG
-    return "SKIP"
+def extract_msg_started(r: dict) -> int:
+    return _count_actions_by_keys(r, MSG_KEYS)
 
 # ========= MAPS & ROWS =========
 def build_maps_vnd(camps, sets, rate, divisor):
@@ -333,9 +319,6 @@ def build_maps_vnd(camps, sets, rate, divisor):
             "attrib": s.get("attribution_spec"), "opt_goal": s.get("optimization_goal")
         }
     return camp_map, adset_map
-
-def extract_msg_started(r: dict) -> int:
-    return _count_actions_by_keys(r, MSG_KEYS)
 
 def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
     out = []
@@ -361,19 +344,12 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
         ctr_all_pct   = to_num(ctr_api) if (ctr_api not in (None,"")) else (pct2(clicks, impr) or "")
         ctr_click_pct = pct2(link, impr) or ""
 
-        # ====== ÉP KẾT QUẢ THEO OBJECTIVE ======
-        bucket = _bucket_from_objective(c.get("objective",""))
-        if bucket == "LEAD":
-            result_count = _count_actions_by_keys(r, LEAD_KEYS)
-            cpa_vnd      = _cpa_from_cost_per_action(r, rate, LEAD_KEYS, spend_vnd, result_count)
-        elif bucket == "MSG":
-            result_count = _count_actions_by_keys(r, MSG_KEYS)
-            cpa_vnd      = _cpa_from_cost_per_action(r, rate, MSG_KEYS, spend_vnd, result_count)
-        else:
-            result_count = ""
-            cpa_vnd      = ""
+        # ====== KẾT QUẢ: CHỈ LEAD ======
+        lead_count = _count_actions_by_keys(r, LEAD_KEYS)
+        result_count = lead_count if lead_count > 0 else ""
+        cpa_vnd      = _cpa_from_cost_per_action(r, rate, LEAD_KEYS, spend_vnd, lead_count)
 
-        msg_started = extract_msg_started(r)  # vẫn điền riêng ở cột "LƯỢT BẮT ĐẦU TRÒ CHUYỆN"
+        msg_started = extract_msg_started(r)  # điền vào cột riêng
 
         out.append([
             r.get("date_start",""),
@@ -386,7 +362,7 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
             adset_spend_vnd or "",
             r.get("ad_name",""),
             msg_started or "",
-            result_count or "",
+            result_count,
             cpa_vnd or "",
             spend_vnd or "",
             cpc_click_vnd or "",
@@ -559,7 +535,7 @@ def run_once():
     all_rows: List[List] = []
     for idx, act in enumerate(cfg["accounts"]):
         if idx > 0:
-            time.sleep(ACCT_COOLDOWN)  # xả quota giữa các account
+            time.sleep(ACCT_COOLDOWN)
         meta = fetch_account_meta(act, token)
         cur  = (meta.get("currency") or "VND").upper()
         rate = 1.0 if cur=="VND" else float(cfg["fx"].get(cur, 0))
