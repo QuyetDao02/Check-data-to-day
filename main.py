@@ -12,8 +12,8 @@ CSV_PATH    = ROOT / "data" / "latest.csv"
 FB_API_VERSION = "v20.0"
 HEADERS_VN = [
     "NGÀY BẮT ĐẦU","ID TÀI KHOẢN","TÊN TÀI KHOẢN",
-    "TÊN CHIẾN DỊCH","NGÂN SÁCH CHIẾN DỊCH (VND)",
-    "TÊN NHÓM QUẢNG CÁO","NGÂN SÁCH NHÓM QUẢNG CÁO (VND)","CHI TIÊU NHÓM QUẢNG CÁO (VND)",
+    "ID CHIẾN DỊCH","TÊN CHIẾN DỊCH","NGÂN SÁCH CHIẾN DỊCH (VND)",
+    "ID NHÓM QUẢNG CÁO","TÊN NHÓM QUẢNG CÁO","NGÂN SÁCH NHÓM QUẢNG CÁO (VND)","CHI TIÊU NHÓM QUẢNG CÁO (VND)",
     "TÊN QUẢNG CÁO","LƯỢT BẮT ĐẦU TRÒ CHUYỆN","KẾT QUẢ","CHI PHÍ/MỖI KẾT QUẢ (VND)",
     "CHI TIÊU QUẢNG CÁO (VND)","CPC CLICK (QC) (VND)","CPC TẤT CẢ (QC) (VND)",
     "CTR CLICK (QC) (%)","CTR TẤT CẢ (QC) (%)","CPM (QC) (VND)",
@@ -21,15 +21,15 @@ HEADERS_VN = [
 ]
 
 # Nhịp & chống rate limit (có thể override bằng ENV)
-PACE_MS                 = int(float(os.environ.get("PACE_MS", 1500)))  # ms giữa 2 call
+PACE_MS                 = int(float(os.environ.get("PACE_MS", 1500)))
 RATE_LIMIT_RETRIES      = int(float(os.environ.get("RATE_LIMIT_RETRIES", 8)))
-RATE_LIMIT_COOLDOWN     = int(float(os.environ.get("RATE_LIMIT_COOLDOWN", 120)))  # giây
+RATE_LIMIT_COOLDOWN     = int(float(os.environ.get("RATE_LIMIT_COOLDOWN", 120)))
 PAGE_BURST              = int(float(os.environ.get("PAGE_BURST", 25)))
 PAGE_BURST_SLEEP        = int(float(os.environ.get("PAGE_BURST_SLEEP", 5)))
 ACCT_COOLDOWN           = int(float(os.environ.get("ACCT_COOLDOWN", 8)))
 RATE_LIMIT_ERR          = "RATE_LIMIT"
 DEBUG                   = os.environ.get("DEBUG","0") == "1"
-REPORT_TIME             = (os.environ.get("REPORT_TIME") or "conversion").strip().lower()  # "conversion"|"impression"
+REPORT_TIME             = (os.environ.get("REPORT_TIME") or "conversion").strip().lower()
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("fb-export")
@@ -115,19 +115,14 @@ def fb_get(url: str, token: str, try_count=0):
         print("[FB_ERR_BODY]" if err_json else "[FB_ERR_TEXT]", (err_json or r.text[:500]))
 
     err = (err_json or {}).get("error", {})
-
-    # coi là rate-limit: 429, code 4/613, is_transient
     if code == 429 or str(err.get("code")) in {"4","613"} or err.get("is_transient"):
         if try_count < MAX_TRIES:
             time.sleep(backoff); return fb_get(url, token, try_count+1)
         raise RuntimeError(RATE_LIMIT_ERR)
-
-    # lỗi tạm thời
     if (code == 400 and str(err.get("code"))=="17") or code >= 500:
         if try_count < MAX_TRIES:
             time.sleep(backoff); return fb_get(url, token, try_count+1)
         raise RuntimeError(f"HTTP {code} after retries: {r.text}")
-
     raise RuntimeError(f"HTTP {code}: {r.text}")
 
 def fb_get_safely(url: str, token: str):
@@ -138,8 +133,7 @@ def fb_get_safely(url: str, token: str):
             if str(e) == RATE_LIMIT_ERR:
                 sleep_s = RATE_LIMIT_COOLDOWN + random.randint(3, 12)
                 if DEBUG: print(f"[COOLDOWN] rate-limit, sleep {sleep_s}s")
-                time.sleep(sleep_s)
-                continue
+                time.sleep(sleep_s); continue
             raise
 
 def fb_paged(url_no_token: str, token: str) -> List[dict]:
@@ -149,8 +143,7 @@ def fb_paged(url_no_token: str, token: str) -> List[dict]:
         out.extend(j.get("data",[]) or [])
         url = j.get("paging",{}).get("next")
         guard += 1
-        if guard % PAGE_BURST == 0:
-            time.sleep(PAGE_BURST_SLEEP)
+        if guard % PAGE_BURST == 0: time.sleep(PAGE_BURST_SLEEP)
         if guard > 10000: raise RuntimeError("Paging overflow.")
     return out
 
@@ -168,12 +161,10 @@ def fetch_campaigns_and_adsets(act_id: str, token: str):
     base = f"https://graph.facebook.com/{FB_API_VERSION}"
     act = requests.utils.quote(act_id)
     camps = fb_paged(
-        f"{base}/{act}/campaigns?fields=id,name,objective,daily_budget,lifetime_budget&limit=500",
-        token
+        f"{base}/{act}/campaigns?fields=id,name,objective,daily_budget,lifetime_budget&limit=500", token
     )
     sets  = fb_paged(
-        f"{base}/{act}/adsets?fields=id,name,campaign_id,attribution_spec,optimization_goal,"
-        "daily_budget,lifetime_budget,effective_status&limit=500",
+        f"{base}/{act}/adsets?fields=id,name,campaign_id,attribution_spec,optimization_goal,daily_budget,lifetime_budget,effective_status&limit=500",
         token
     )
     return {"campaigns": camps, "adsets": sets}
@@ -197,80 +188,54 @@ def fetch_adset_spend_map_vnd(act_id: str, since: str, until: str, rate: float, 
             out[key] = vnd
         url = j.get("paging",{}).get("next")
         guard += 1
-        if guard % PAGE_BURST == 0:
-            time.sleep(PAGE_BURST_SLEEP)
+        if guard % PAGE_BURST == 0: time.sleep(PAGE_BURST_SLEEP)
         if guard > 10000: raise RuntimeError("Paging overflow (adset spend).")
     return out
 
 def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[dict]:
-    # level=ad + time_increment=1 -> dữ liệu theo NGÀY & QUẢNG CÁO
     act = requests.utils.quote(act_id)
     base = f"https://graph.facebook.com/{FB_API_VERSION}/{act}/insights"
-
     base_fields = [
         "date_start","account_id","campaign_id","campaign_name",
         "adset_id","adset_name","ad_id","ad_name",
-        "impressions","reach","spend","clicks","inline_link_clicks",
-        "cpm","cpc","ctr"
+        "impressions","reach","spend","clicks","inline_link_clicks","cpm","cpc","ctr"
     ]
     action_fields = ["actions","cost_per_action_type"]
-
     def build_url(mode: str) -> str:
         fields = base_fields.copy()
         params = {
             "level":"ad","limit":"500",
             "time_range": json.dumps({"since":since,"until":until}),
-            "time_increment":"1",
-            "use_unified_attribution_setting":"true",
+            "time_increment":"1","use_unified_attribution_setting":"true",
         }
         if REPORT_TIME in ("conversion","impression"):
             params["action_report_time"] = REPORT_TIME
-        if mode in ("full","plain"):
-            fields += action_fields
-        params["fields"] = ",".join(fields)
+        if mode in ("full","plain"): fields += action_fields
         q = "&".join([f"{k}={requests.utils.quote(str(v))}" for k,v in params.items()])
         return f"{base}?{q}"
-
-    modes = ["full","plain","basic"]
-    data: List[dict] = []
-
+    modes = ["full","plain","basic"]; data: List[dict] = []
     for mode in modes:
         url = build_url(mode) if mode!="basic" else build_url("plain").replace(",".join(action_fields), "")
-        if DEBUG: print(f"[INSIGHTS] try mode={mode}")
-
         out = []; guard = 0
         while url:
-            try:
-                j = fb_get_safely(url, token)
+            try: j = fb_get_safely(url, token)
             except RuntimeError as e:
                 msg = str(e)
                 if ("Invalid parameter" in msg) or ("\"code\":100" in msg) or ("error_subcode\":1504018" in msg):
-                    if DEBUG: print(f"[INSIGHTS] mode={mode} invalid -> fallback")
                     out = []; url = None; break
                 raise
             out.extend(j.get("data",[]) or [])
             url = j.get("paging",{}).get("next")
             guard += 1
-            if guard % PAGE_BURST == 0:
-                time.sleep(PAGE_BURST_SLEEP)
+            if guard % PAGE_BURST == 0: time.sleep(PAGE_BURST_SLEEP)
             if guard > 10000: raise RuntimeError("Paging overflow.")
-        if out:
-            data = out
-            if DEBUG: print(f"[INSIGHTS] success mode={mode}, rows={len(data)}")
-            break
+        if out: data = out; break
     return data
 
-# ========= ACTION PICKERS (không cộng dồn) =========
-LEAD_KEYS_PRIORITY = [
-    "lead",                       # phổ biến nhất
-    "onsite_conversion.lead",     # Instant Forms
-    "leadgen",
-    "onsite_conversion.lead_grouped"
-]
-
-MSG_KEYS_PRIORITY = [
-    "messaging_conversations_started",     # tên hay dùng trong UI
-    "messaging_conversation_started",
+# ========= ACTION PICKERS =========
+LEAD_KEYS_PRIORITY = ["lead","onsite_conversion.lead","leadgen","onsite_conversion.lead_grouped"]
+MSG_KEYS_PRIORITY  = [
+    "messaging_conversations_started","messaging_conversation_started",
     "onsite_conversion.messaging_conversation_started_7d",
     "onsite_conversion.messaging_first_reply",
     "onsite_conversion.messaging_conversation_started_28d",
@@ -284,31 +249,23 @@ def _actions_map(r: dict) -> dict:
         for it in arr:
             k = str(it.get("action_type","")).lower()
             v = to_num(it.get("value"))
-            # ưu tiên lần gặp đầu tiên để tránh ghi đè
-            if k not in out:
-                out[k] = v
+            if k not in out: out[k] = v
     return out
 
 def _pick_first(map0: dict, keys: List[str]) -> Tuple[float, str]:
-    # exact match trước
     for k in keys:
-        if k in map0:
-            return map0[k], k
-    # contains match (phòng trường hợp action_type có hậu tố)
+        if k in map0: return map0[k], k
     for k in keys:
         for kk, vv in map0.items():
-            if k in kk:
-                return vv, kk
+            if k in kk: return vv, kk
     return 0.0, ""
 
 def extract_lead_count(r: dict) -> Tuple[int, str]:
-    m = _actions_map(r)
-    v, k = _pick_first(m, LEAD_KEYS_PRIORITY)
+    m = _actions_map(r); v, k = _pick_first(m, LEAD_KEYS_PRIORITY)
     return int(round(v)), k
 
 def extract_msg_started(r: dict) -> int:
-    m = _actions_map(r)
-    v, _ = _pick_first(m, MSG_KEYS_PRIORITY)
+    m = _actions_map(r); v, _ = _pick_first(m, MSG_KEYS_PRIORITY)
     return int(round(v))
 
 def extract_cpa_vnd_for_key_priority(r: dict, rate: float, first_key: str, fallback_keys: List[str],
@@ -316,21 +273,13 @@ def extract_cpa_vnd_for_key_priority(r: dict, rate: float, first_key: str, fallb
     arr = r.get("cost_per_action_type")
     keys = [first_key] + [k for k in fallback_keys if k != first_key]
     if isinstance(arr, list):
-        # map cost
-        m = {}
-        for it in arr:
-            at = str(it.get("action_type","")).lower()
-            m[at] = to_num(it.get("value")) * rate
-        # exact trước rồi contains
+        m = {str(it.get("action_type","")).lower(): to_num(it.get("value")) * rate for it in arr}
         for k in keys:
-            if not k: continue
-            if k in m:
-                return money0(m[k])
+            if k and k in m: return money0(m[k])
         for k in keys:
             if not k: continue
             for kk, vv in m.items():
-                if k in kk:
-                    return money0(vv)
+                if k in kk: return money0(vv)
     return money0(spend_vnd / result_count) if result_count > 0 else ""
 
 # ========= MAPS & ROWS =========
@@ -374,29 +323,24 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
         ctr_all_pct   = to_num(ctr_api) if (ctr_api not in (None,"")) else (pct2(clicks, impr) or "")
         ctr_click_pct = pct2(link, impr) or ""
 
-        # === ONLY LEAD in "KẾT QUẢ" (ad-level, daily) ===
         lead_count, lead_key = extract_lead_count(r)
-
-        # Messaging starts (single metric)
         msg_started = extract_msg_started(r)
-
-        # CPA theo đúng action key đã chọn cho LEAD
-        cpa_vnd = extract_cpa_vnd_for_key_priority(
-            r, rate, lead_key, LEAD_KEYS_PRIORITY, spend_vnd, lead_count
-        )
+        cpa_vnd = extract_cpa_vnd_for_key_priority(r, rate, lead_key, LEAD_KEYS_PRIORITY, spend_vnd, lead_count)
 
         out.append([
             r.get("date_start",""),
             r.get("account_id",""),
             account_name or "",
+            r.get("campaign_id",""),                 # ID CHIẾN DỊCH trước tên
             r.get("campaign_name",""),
-            camp_map.get(s.get("campaign_id",""),{}).get("daily","") if s.get("campaign_id") else c.get("daily",""),
+            (camp_map.get(s.get("campaign_id",""),{}) or c).get("daily",""),
+            r.get("adset_id",""),                    # ID NHÓM QUẢNG CÁO trước tên
             r.get("adset_name",""),
             s.get("daily",""),
             adset_spend_vnd or "",
             r.get("ad_name",""),
             msg_started or "",
-            lead_count or "",               # <-- KẾT QUẢ = LEAD ONLY
+            lead_count or "",
             cpa_vnd or "",
             spend_vnd or "",
             cpc_click_vnd or "",
@@ -439,8 +383,7 @@ def _csv_rows_from_gsheet_csv(sheet_id: str, sheet_name: str=None, gid: str=None
             rows = list(csv.reader(io.StringIO(r.text)))
             if rows: return rows
         except Exception as e:
-            last_err = e
-            continue
+            last_err = e; continue
     if last_err: raise last_err
     return []
 
@@ -456,7 +399,6 @@ def load_from_sheet_or_fail() -> dict:
     sheet_id   = os.environ.get("SHEET_ID")
     if not sheet_id:
         emit_error_csv("Thiếu biến SHEET_ID."); raise SystemExit(1)
-
     sheet_name = os.environ.get("API_SHEET_NAME","api")
     sheet_gid  = os.environ.get("API_SHEET_GID")
 
@@ -469,9 +411,7 @@ def load_from_sheet_or_fail() -> dict:
     since = to_ymd_any(since_raw)
     until = to_ymd_any(until_raw)
     if not since or not until or not accounts_s:
-        if DEBUG: print("[SHEET DUMP D2:D4]", d_vals)
-        emit_error_csv("Thiếu cấu hình 'api': D2 (since), D3 (until), D4 (ad accounts).")
-        raise SystemExit(1)
+        emit_error_csv("Thiếu cấu hình 'api': D2 (since), D3 (until), D4 (ad accounts)."); raise SystemExit(1)
 
     try: datetime.date.fromisoformat(since)
     except: emit_error_csv("Sai định dạng 'since'"); raise SystemExit(1)
@@ -496,28 +436,23 @@ def load_from_sheet_or_fail() -> dict:
             except: pass
     if "VND" not in fx: fx["VND"] = 1.0
 
-    if DEBUG: print("[CONFIG] since:", since, "until:", until, "accounts:", accounts)
-
     _apply_env_overrides()
     return {"since": since, "until": until, "accounts": accounts, "fx": fx}
 
 def load_from_config_file_or_fail() -> dict:
     if not CONFIG_PATH.exists():
-        emit_error_csv("Thiếu SHEET_ID hoặc config/config.yml.")
-        raise SystemExit(1)
+        emit_error_csv("Thiếu SHEET_ID hoặc config/config.yml."); raise SystemExit(1)
     try:
         cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception as e:
-        emit_error_csv(f"Lỗi đọc config.yml: {e}")
-        raise SystemExit(1)
+        emit_error_csv(f"Lỗi đọc config.yml: {e}"); raise SystemExit(1)
 
     missing = []
     if not cfg.get("since"):    missing.append("since")
     if not cfg.get("until"):    missing.append("until")
     if not cfg.get("accounts"): missing.append("accounts")
     if missing:
-        emit_error_csv("Thiếu cấu hình trong config.yml: " + ", ".join(missing))
-        raise SystemExit(1)
+        emit_error_csv("Thiếu cấu hình trong config.yml: " + ", ".join(missing)); raise SystemExit(1)
 
     since = to_ymd_any(cfg["since"]); until = to_ymd_any(cfg["until"])
     try: datetime.date.fromisoformat(since)
@@ -539,43 +474,34 @@ def load_from_config_file_or_fail() -> dict:
         emit_error_csv("Sai fx trong config.yml"); raise SystemExit(1)
     if "VND" not in fx: fx["VND"] = 1.0
 
-    if DEBUG: print("[CONFIG] since:", since, "until:", until, "accounts:", accounts)
-
     _apply_env_overrides()
     return {"since": since, "until": until, "accounts": accounts, "fx": fx}
 
 def load_config_or_fail() -> dict:
-    if os.environ.get("SHEET_ID"):
-        return load_from_sheet_or_fail()
+    if os.environ.get("SHEET_ID"): return load_from_sheet_or_fail()
     return load_from_config_file_or_fail()
 
 # ========= MAIN =========
 def write_full_csv(rows: List[List]):
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(HEADERS_VN)
-        if rows:
-            w.writerows(rows)
+        w = csv.writer(f); w.writerow(HEADERS_VN)
+        if rows: w.writerows(rows)
 
 def run_once():
     cfg = load_config_or_fail()
-
     token = os.environ.get("META_TOKEN")
     if not token:
-        emit_error_csv("Thiếu META_TOKEN trong workflow (sync.yml).")
-        raise SystemExit(1)
+        emit_error_csv("Thiếu META_TOKEN trong workflow (sync.yml)."); raise SystemExit(1)
 
     all_rows: List[List] = []
     for idx, act in enumerate(cfg["accounts"]):
-        if idx > 0:
-            time.sleep(ACCT_COOLDOWN)
+        if idx > 0: time.sleep(ACCT_COOLDOWN)
         meta = fetch_account_meta(act, token)
         cur  = (meta.get("currency") or "VND").upper()
         rate = 1.0 if cur=="VND" else float(cfg["fx"].get(cur, 0))
         if cur!="VND" and (not rate or rate <= 0):
-            emit_error_csv(f"Thiếu tỷ giá VND cho {cur} (cột G:H).")
-            raise SystemExit(1)
+            emit_error_csv(f"Thiếu tỷ giá VND cho {cur} (cột G:H)."); raise SystemExit(1)
         divisor = minor_unit_divisor(cur)
 
         meta_sets = fetch_campaigns_and_adsets(act, token)
@@ -591,10 +517,7 @@ def run_once():
     print(json.dumps({"status":"done","rows":len(all_rows)}, ensure_ascii=False))
 
 if __name__ == "__main__":
-    try:
-        run_once()
-    except SystemExit:
-        raise
+    try: run_once()
+    except SystemExit: raise
     except Exception as e:
-        emit_error_csv(f"Lỗi không xác định: {e}")
-        raise
+        emit_error_csv(f"Lỗi không xác định: {e}"); raise
