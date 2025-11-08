@@ -1,2 +1,2 @@
 ERROR
-Lỗi không xác định: HTTP 400: {"error":{"message":"(#10) Privacy check failed for ads insights access (account 766454109683951, id 120235083613610329): DENY_RULE:AdsInsightsAPIActionsPrivacyPolicy:AlwaysDenyRule:3 (In the absence of other rules, this content is hidden.)","type":"OAuthException","code":10,"fbtrace_id":"AS9hHKz4nSluteHjmKWg4Oh"}}
+Lỗi không xác định: HTTP 400: {"error":{"message":"(#10) Privacy check failed for ads insights access (account 766454109683951, id 120235083613610329): DENY_RULE:AdsInsightsAPIActionsPrivacyPolicy:AlwaysDenyRule:3 (In the absence of other rules, this content is hidden.)","type":"OAuthException","code":10,"fbtrace_id":"Ax1pkFm5Q6YRpx-P4DW3oBz"}}
