@@ -1,2 +1,2 @@
 ERROR
-Lỗi không xác định: HTTP 400: {"error":{"message":"You cannot access the app till you log in to www.facebook.com and follow the instructions given.","type":"OAuthException","code":190,"error_data":"{\"checkpoint_url\":\"https:\\\/\\\/www.facebook.com\"}","error_subcode":459,"fbtrace_id":"A6_53VFYp5hvCPA0zPxkRZo"}}
+Lỗi không xác định: HTTP 400: {"error":{"message":"You cannot access the app till you log in to www.facebook.com and follow the instructions given.","type":"OAuthException","code":190,"error_data":"{\"checkpoint_url\":\"https:\\\/\\\/www.facebook.com\"}","error_subcode":459,"fbtrace_id":"ARXytxqAuQdA4BqIdCyKY3_"}}
