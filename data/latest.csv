@@ -1,2 +1,2 @@
 ERROR
-Lỗi không xác định: HTTP 400: {"error":{"message":"Error validating access token: The session has been invalidated because the user changed their password or Facebook has changed the session for security reasons.","type":"OAuthException","code":190,"error_subcode":460,"fbtrace_id":"A7uLby_dh_M1m3t8Q9-7k-C"}}
+Lỗi không xác định: HTTP 400: {"error":{"message":"Error validating access token: The session has been invalidated because the user changed their password or Facebook has changed the session for security reasons.","type":"OAuthException","code":190,"error_subcode":460,"fbtrace_id":"Al8nr-U4JKh4zR3Cbw6-vdE"}}
