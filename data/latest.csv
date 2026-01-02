@@ -1,2 +1,2 @@
 ERROR
-Lỗi không xác định: HTTP 400: {"error":{"message":"Error validating access token: Session has expired on Tuesday, 30-Dec-25 21:00:00 PST. The current time is Friday, 02-Jan-26 11:17:05 PST.","type":"OAuthException","code":190,"error_subcode":463,"fbtrace_id":"AtoXaV05JXk_hnfT09OOi-f"}}
+Lỗi không xác định: HTTP 400: {"error":{"message":"Error validating access token: Session has expired on Tuesday, 30-Dec-25 21:00:00 PST. The current time is Friday, 02-Jan-26 11:28:37 PST.","type":"OAuthException","code":190,"error_subcode":463,"fbtrace_id":"A0QcuFEWEvDH2txOz3VOA7Z"}}
