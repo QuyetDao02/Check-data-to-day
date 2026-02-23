@@ -1,2 +1,2 @@
 ERROR
-Lỗi không xác định: HTTP 403: {"error":{"message":"(#200) Ad account owner has NOT grant ads_management or ads_read permission, refer to https:\/\/developers.facebook.com\/docs\/marketing-api\/get-started\/authorization\/#permissions-and-features for details.","type":"OAuthException","code":200,"fbtrace_id":"Avq5rXy1w0Yq0ulNeVmTjVR"}}
+Lỗi không xác định: HTTP 403: {"error":{"message":"(#200) Ad account owner has NOT grant ads_management or ads_read permission, refer to https:\/\/developers.facebook.com\/docs\/marketing-api\/get-started\/authorization\/#permissions-and-features for details.","type":"OAuthException","code":200,"fbtrace_id":"AG5rJsdqk0bwT3yP4G_L7Xw"}}
