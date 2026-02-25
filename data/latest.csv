@@ -1,2 +1,2 @@
 ERROR
-Lỗi không xác định: HTTP 400: {"error":{"message":"Service temporarily unavailable","type":"OAuthException","is_transient":false,"code":2,"error_subcode":1504043,"error_user_title":"L\u1ed7i gi\u00e1n \u0111o\u1ea1n","error_user_msg":"\u0110\u00e3 x\u1ea3y ra l\u1ed7i gi\u00e1n \u0111o\u1ea1n v\u1edbi y\u00eau c\u1ea7u c\u1ee7a b\u1ea1n. H\u00e3y th\u1eed l\u1ea1i sau","fbtrace_id":"AMP62dO0fFG-BifU1QJLxMQ"}}
+Lỗi không xác định: HTTP 403: {"error":{"message":"(#200) Ad account owner has NOT grant ads_management or ads_read permission, refer to https:\/\/developers.facebook.com\/docs\/marketing-api\/get-started\/authorization\/#permissions-and-features for details.","type":"OAuthException","code":200,"fbtrace_id":"AAa3PSiJ_FElASXvb01o02H"}}
