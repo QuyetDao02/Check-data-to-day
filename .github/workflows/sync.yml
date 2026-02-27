@@ -2,7 +2,7 @@ name: FB CSV Export (no GCP)
 
 on:
   workflow_dispatch:
-  schedule:
+  schedule:https://github.com/QuyetDao02/Check-data-to-day/edit/main/.github/workflows/sync.yml#
     - cron: "*/20 * * * *"
 
 permissions:
@@ -16,7 +16,7 @@ jobs:
       SHEET_ID: 1jkdkGG2A8JS2GE728CwvkeVRFNXG7-28TN9GbXo1SYY
       API_SHEET_NAME: api
       API_SHEET_GID: "1875921302"
-      META_TOKEN: "EAATnZA0YVyJoBQS3aYZCmZBMYFUBLhaUw8wti6zDIwYqwaG4ITlYDvxdbhjilLgP4wfe6jpejGvimtEFSZC3aSsefkHaBL3FCDBGkDPTxImI5YwhCX8LBB51C4v8ZCAb6T0pORheYl76GOr1Q6nF91clKHv7A0FcmDxqw2qGdBiGNTFxUJzLcEOPIB5Gz"
+      META_TOKEN: "EAATnZA0YVyJoBQ8562hY4U4yKBrV0hSdoM21JQ6MB4KPIajYXca99KIIJZCZBbZBdcoq4mmOcbqrHCCRGR2SZACZAVYICm8X0Ig3ORsV8tS5Ijeqrg348niZB8zxFHyMZBjX3WvsPlP4bP4oRTNDz1kn2tAUMM7sc24f1kveNzROvFmWagOGibhcWeFd5xSmZCcZCg"
       DEBUG: "0"   # đổi "1" nếu cần soi log cấu hình/ lỗi FB
 
     steps:
