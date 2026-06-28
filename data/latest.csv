@@ -1,2 +1,2 @@
 ERROR
-Lỗi không xác định: HTTP 400: {"error":{"message":"Error validating access token: Session has expired on Saturday, 27-Jun-26 02:37:23 PDT. The current time is Saturday, 27-Jun-26 23:01:26 PDT.","type":"OAuthException","code":190,"error_subcode":463,"fbtrace_id":"AenTRtwxf_3tPjhohApIaMt"}}
+Lỗi không xác định: HTTP 400: {"error":{"message":"Error validating access token: The session has been invalidated because the user changed their password or Facebook has changed the session for security reasons.","type":"OAuthException","code":190,"error_subcode":460,"fbtrace_id":"AX966dolQ8J6wzxXMuza1Pk"}}
