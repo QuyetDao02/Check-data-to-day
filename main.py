@@ -257,35 +257,21 @@ def fb_get(url: str, token: str, try_count=0):
 
 
 def fb_get_safely(url: str, token: str):
-    max_cooldown = 3
+    try:
+        return fb_get(url, token)
 
-    for attempt in range(max_cooldown):
-        try:
-            return fb_get(url, token)
+    except RuntimeError as e:
+        msg = str(e)
 
-        except RuntimeError as e:
-            msg = str(e)
+        # Meta tạm thời lỗi -> báo cho caller xử lý
+        if (
+            "1504044" in msg
+            or "META_TEMPORARY_ERROR" in msg
+            or "Service temporarily unavailable" in msg
+        ):
+            raise RuntimeError("META_SKIP_ACCOUNT")
 
-            if (
-                msg == RATE_LIMIT_ERR
-                or "META_TEMPORARY_ERROR" in msg
-                or "1504044" in msg
-                or "Service temporarily unavailable" in msg
-            ):
-                sleep_s = RATE_LIMIT_COOLDOWN + random.randint(5, 20)
-
-                log.warning(
-                    "Meta temporary/rate-limit error. "
-                    "Cooldown %ss (%s/%s)",
-                    sleep_s,
-                    attempt + 1,
-                    max_cooldown
-                )
-
-                time.sleep(sleep_s)
-                continue
-
-            raise
+        raise
 
     raise RuntimeError(
         "Meta API vẫn không khả dụng sau nhiều lần retry/cooldown."
@@ -1231,80 +1217,78 @@ def run_once():
 
     all_rows = []
 
-    for index, act_id in enumerate(
-        config["accounts"]
-    ):
+    for idx, act in enumerate(cfg["accounts"]):
 
-        if index > 0:
-            time.sleep(
-                ACCT_COOLDOWN
-            )
+    if idx > 0:
+        time.sleep(ACCT_COOLDOWN)
 
-        log.info(
-            "Running Campaign Level: %s",
-            act_id
+    log.info("Running Campaign Level: %s", act)
+
+    try:
+        meta = fetch_account_meta(act, token)
+
+        cur = (meta.get("currency") or "VND").upper()
+
+        rate = (
+            1.0
+            if cur == "VND"
+            else float(cfg["fx"].get(cur, 0))
         )
 
-        meta = fetch_account_meta(
-            act_id,
+        if cur != "VND" and rate <= 0:
+            log.error(
+                "Missing FX rate for %s - skip %s",
+                cur,
+                act
+            )
+            continue
+
+        ads = fetch_campaign_insights(
+            act,
+            cfg["since"],
+            cfg["until"],
             token
         )
 
-        currency = (
-            meta.get("currency")
-            or "VND"
-        ).upper()
-
-        if currency == "VND":
-
-            rate = 1.0
-
-        else:
-
-            rate = float(
-                config["fx"].get(
-                    currency,
-                    0
-                )
-            )
-
-        if (
-            currency != "VND"
-            and (
-                not rate
-                or rate <= 0
-            )
-        ):
-
-            emit_error_csv(
-                f"Thiếu tỷ giá "
-                f"VND cho {currency}."
-            )
-
-            raise SystemExit(1)
-
-        # =================================================
-        # CHỈ LẤY CAMPAIGN LEVEL
-        # =================================================
-        campaign_rows = (
-            fetch_campaign_insights(
-                act_id,
-                config["since"],
-                config["until"],
-                token
-            )
-        )
-
         rows = map_rows(
-            campaign_rows,
-            meta["name"],
+            ads,
+            meta.get("name", ""),
             rate
         )
 
-        all_rows.extend(
-            rows
+        all_rows.extend(rows)
+
+        log.info(
+            "Campaign Level done: %s | rows=%s",
+            act,
+            len(rows)
         )
 
+    except RuntimeError as e:
+
+        if str(e) == "META_SKIP_ACCOUNT":
+            log.error(
+                "Meta unavailable for %s. "
+                "Skip account and continue.",
+                act
+            )
+            continue
+
+        log.error(
+            "Account %s failed: %s",
+            act,
+            e
+        )
+        continue
+
+    except Exception as e:
+
+        log.exception(
+            "Unexpected error on account %s: %s",
+            act,
+            e
+        )
+        continue
     write_full_csv(
         all_rows
     )
