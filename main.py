@@ -17,7 +17,7 @@ HEADERS_VN = [
     "ID CHIẾN DỊCH",
     "TÊN CHIẾN DỊCH",
     "NGÂN SÁCH CHIẾN DỊCH (VND)",
-    "CHI TIÊU NHÓM CHIẾN DỊCH (VND)",
+    "CHI TIÊU CHIẾN DỊCH (VND)",
     "LƯỢT BẮT ĐẦU TRÒ CHUYỆN",
     "KẾT QUẢ"
 ]
@@ -383,7 +383,7 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
             r.get("campaign_id",""),
             r.get("campaign_name",""),
             camp_map.get(s.get("campaign_id",""),{}).get("daily","") if s.get("campaign_id") else c.get("daily",""),
-            adset_spend_vnd or "",
+            spend_vnd or "",
             msg_started or "",
             lead_count or ""
         ])
