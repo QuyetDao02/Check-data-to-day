@@ -153,95 +153,84 @@ def quote(value) -> str:
 # =========================================================
 # FACEBOOK API
 # =========================================================
-def fb_get(
-    url: str,
-    token: str,
-    try_count: int = 0
-):
+def fb_get(url: str, token: str, try_count=0):
     pace()
 
-    max_tries = max(
-        RATE_LIMIT_RETRIES,
-        3
-    )
+    MAX_TRIES = max(RATE_LIMIT_RETRIES, 5)
 
     backoff = min(
-        1.2 * (1.8 ** try_count)
-        + random.random() * 0.7,
-        25.0
+        3.0 * (2.0 ** try_count) + random.uniform(0.5, 2.0),
+        60.0
     )
-
-    response = requests.get(
-        url,
-        params={"access_token": token},
-        timeout=60
-    )
-
-    code = response.status_code
-
-    if 200 <= code < 300:
-        return response.json()
-
-    error_json = None
 
     try:
-        error_json = response.json()
+        r = requests.get(
+            with_token(url, token),
+            timeout=90
+        )
+    except requests.RequestException as e:
+        if try_count < MAX_TRIES:
+            log.warning(
+                "Request error, retry %s/%s after %.1fs: %s",
+                try_count + 1,
+                MAX_TRIES,
+                backoff,
+                e
+            )
+            time.sleep(backoff)
+            return fb_get(url, token, try_count + 1)
+
+        raise RuntimeError(f"REQUEST_ERROR: {e}")
+
+    code = r.status_code
+
+    if 200 <= code < 300:
+        try:
+            return r.json()
+        except Exception:
+            raise RuntimeError("Meta API trả về dữ liệu JSON không hợp lệ.")
+
+    try:
+        err_json = r.json()
     except Exception:
-        pass
+        err_json = {}
+
+    err = err_json.get("error", {}) if isinstance(err_json, dict) else {}
+
+    err_code = str(err.get("code", ""))
+    err_subcode = str(err.get("error_subcode", ""))
+    err_msg = str(err.get("message", ""))
 
     if DEBUG:
-        print(
-            f"[FB_ERR] HTTP {code} @ "
-            f"{url.split('?')[0]}"
-        )
+        short = url.split("?")[0]
+        print(f"[FB_ERR] HTTP {code} @ {short}")
+        print("[FB_ERR_BODY]", err_json or r.text[:500])
 
-        print(
-            error_json
-            if error_json
-            else response.text[:500]
-        )
-
-    error = (error_json or {}).get(
-        "error",
-        {}
-    )
-
-    error_code = str(
-        error.get("code", "")
-    )
-
-    retryable = (
+    # ==========================================================
+    # META TEMPORARY / TRANSIENT ERRORS
+    # ==========================================================
+    temporary_error = (
         code == 429
-        or error_code in {"4", "613"}
-        or error.get("is_transient")
-    )
-
-    if retryable:
-
-        if try_count < max_tries:
-            time.sleep(backoff)
-
-            return fb_get(
-                url,
-                token,
-                try_count + 1
-            )
-
-        raise RuntimeError(
-            RATE_LIMIT_ERR
-        )
-
-    server_error = (
-        (
-            code == 400
-            and error_code == "17"
-        )
         or code >= 500
+        or err_code in {"2", "4", "17", "613"}
+        or err_subcode == "1504044"
+        or bool(err.get("is_transient"))
+        or "temporarily unavailable" in err_msg.lower()
     )
 
-    if server_error:
+    if temporary_error:
+        if try_count < MAX_TRIES:
+            log.warning(
+                "Meta temporary error: HTTP=%s code=%s subcode=%s "
+                "retry=%s/%s sleep=%.1fs",
+                code,
+                err_code,
+                err_subcode,
+                try_count + 1,
+                MAX_TRIES,
+                backoff
+            )
 
-        if try_count < max_tries:
             time.sleep(backoff)
 
             return fb_get(
@@ -251,49 +240,53 @@ def fb_get(
             )
 
         raise RuntimeError(
-            f"HTTP {code} after retries: "
-            f"{response.text}"
+            f"META_TEMPORARY_ERROR: "
+            f"HTTP {code}, code={err_code}, "
+            f"subcode={err_subcode}: {err_msg}"
         )
 
+    # ==========================================================
+    # CÁC LỖI KHÁC
+    # ==========================================================
     raise RuntimeError(
-        f"HTTP {code}: {response.text}"
+        f"HTTP {code}: {r.text}"
     )
 
 
-def fb_get_safely(
-    url: str,
-    token: str
-):
-    while True:
+def fb_get_safely(url: str, token: str):
+    max_cooldown = 3
 
+    for attempt in range(max_cooldown):
         try:
-            return fb_get(
-                url,
-                token
-            )
+            return fb_get(url, token)
 
-        except RuntimeError as error:
+        except RuntimeError as e:
+            msg = str(e)
 
-            if str(error) == RATE_LIMIT_ERR:
+            if (
+                msg == RATE_LIMIT_ERR
+                or "META_TEMPORARY_ERROR" in msg
+                or "1504044" in msg
+                or "Service temporarily unavailable" in msg
+            ):
+                sleep_s = RATE_LIMIT_COOLDOWN + random.randint(5, 20)
 
-                sleep_seconds = (
-                    RATE_LIMIT_COOLDOWN
-                    + random.randint(3, 12)
+                log.warning(
+                    "Meta temporary/rate-limit error. "
+                    "Cooldown %ss (%s/%s)",
+                    sleep_s,
+                    attempt + 1,
+                    max_cooldown
                 )
 
-                if DEBUG:
-                    print(
-                        "[COOLDOWN] "
-                        f"sleep {sleep_seconds}s"
-                    )
-
-                time.sleep(
-                    sleep_seconds
-                )
-
+                time.sleep(sleep_s)
                 continue
 
             raise
+
+    raise RuntimeError(
+        "Meta API vẫn không khả dụng sau nhiều lần retry/cooldown."
+    )
 
 
 def fb_paged(
