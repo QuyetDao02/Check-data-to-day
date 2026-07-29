@@ -9,14 +9,13 @@ CONFIG_PATH = ROOT / "config" / "config.yml"
 CSV_PATH    = ROOT / "data" / "latest.csv"
 
 # ========= CONFIG =========
-FB_API_VERSION = "v20.0"
+FB_API_VERSION = "v25.0"
 HEADERS_VN = [
-    "NGÀY BẮT ĐẦU",
+        "NGÀY BẮT ĐẦU",
     "ID TÀI KHOẢN",
     "TÊN TÀI KHOẢN",
     "ID CHIẾN DỊCH",
     "TÊN CHIẾN DỊCH",
-    "NGÂN SÁCH CHIẾN DỊCH (VND)",
     "CHI TIÊU CHIẾN DỊCH (VND)",
     "LƯỢT BẮT ĐẦU TRÒ CHUYỆN",
     "KẾT QUẢ"
@@ -79,20 +78,6 @@ def money0(v) -> int:
         return int(round(float(v)))
     except:
         return 0
-
-def pct2(a, b):
-    n, d = to_num(a), to_num(b)
-    return None if d <= 0 else (n/d)*100.0
-
-def fmt_pct(val) -> str:
-    if val is None or val == "": return ""
-    try:
-        return f"{round(float(val), 2)}%"
-    except:
-        return ""
-
-def minor_unit_divisor(cur: str) -> int:
-    return 1 if (cur or "").upper() in ("VND","JPY","KRW") else 100
 
 def with_token(url: str, token: str) -> str:
     sep = "&" if "?" in url else "?"
@@ -164,49 +149,15 @@ def fetch_account_meta(act_id: str, token: str) -> dict:
         if str(e)==RATE_LIMIT_ERR: raise
         return {"name":"","currency":"VND"}
 
-def fetch_campaigns_and_adsets(act_id: str, token: str):
-    base = f"https://graph.facebook.com/{FB_API_VERSION}"
-    act = requests.utils.quote(act_id)
-    camps = fb_paged(
-        f"{base}/{act}/campaigns?fields=id,name,objective,daily_budget,lifetime_budget&limit=500",
-        token
-    )
-    sets  = fb_paged(
-        f"{base}/{act}/adsets?fields=id,name,campaign_id,attribution_spec,optimization_goal,"
-        "daily_budget,lifetime_budget,effective_status&limit=500",
-        token
-    )
-    return {"campaigns": camps, "adsets": sets}
-
-def fetch_adset_spend_map_vnd(act_id: str, since: str, until: str, rate: float, token: str) -> dict:
-    act = requests.utils.quote(act_id)
-    base = f"https://graph.facebook.com/{FB_API_VERSION}/{act}/insights"
-    params = {
-        "level":"adset", "fields":"date_start,adset_id,spend", "limit":"500",
-        "time_range": json.dumps({"since":since,"until":until}), "time_increment":"1",
-        "use_unified_attribution_setting":"true",
-    }
-    q = "&".join([f"{k}={requests.utils.quote(str(v))}" for k,v in params.items()])
-    url = f"{base}?{q}"
-    out = {}; guard = 0
-    while url:
-        j = fb_get_safely(url, token)
-        for row in j.get("data",[]) or []:
-            key = f"{row.get('adset_id','')}|{row.get('date_start','')}"
-            vnd = money0((float(row.get("spend",0)) if row.get("spend") else 0.0) * rate)
-            out[key] = vnd
-        url = j.get("paging",{}).get("next")
-        guard += 1
-        if guard % PAGE_BURST == 0:
-            time.sleep(PAGE_BURST_SLEEP)
-        if guard > 10000: raise RuntimeError("Paging overflow (adset spend).")
-    return out
-
 def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[dict]:
     act = requests.utils.quote(act_id)
     base = f"https://graph.facebook.com/{FB_API_VERSION}/{act}/insights"
 
-    base_fields = [
+        "date_start",
+    "account_id",
+    "campaign_id",
+    "campaign_name",
+    "spend"= [
         "date_start","account_id","campaign_id","campaign_name",
         "adset_id","adset_name","ad_id","ad_name",
         "impressions","reach","spend","clicks","inline_link_clicks",
@@ -217,7 +168,7 @@ def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[d
     def build_url(mode: str) -> str:
         fields = base_fields.copy()
         params = {
-            "level":"ad","limit":"500",
+            "level":"campaign","limit":"500",
             "time_range": json.dumps({"since":since,"until":until}),
             "time_increment":"1",
             "use_unified_attribution_setting":"true",
@@ -307,86 +258,28 @@ def extract_msg_started(r: dict) -> int:
     v, _ = _pick_first(m, MSG_KEYS_PRIORITY)
     return int(round(v))
 
-def extract_cpa_vnd_for_key_priority(r: dict, rate: float, first_key: str, fallback_keys: List[str],
-                                     spend_vnd: float, result_count: int):
-    arr = r.get("cost_per_action_type")
-    keys = [first_key] + [k for k in fallback_keys if k != first_key]
-    if isinstance(arr, list):
-        m = {}
-        for it in arr:
-            at = str(it.get("action_type","")).lower()
-            m[at] = to_num(it.get("value")) * rate
-        for k in keys:
-            if not k: continue
-            if k in m: return money0(m[k])
-        for k in keys:
-            if not k: continue
-            for kk, vv in m.items():
-                if k in kk:
-                    return money0(vv)
-    return money0(spend_vnd / result_count) if result_count > 0 else ""
-
 # ========= MAPS & ROWS =========
-def build_maps_vnd(camps, sets, rate, divisor):
-    camp_map = {}
-    for c in camps or []:
-        daily = money0((float(c["daily_budget"])/divisor)*rate) if c.get("daily_budget") else ""
-        life  = money0((float(c["lifetime_budget"])/divisor)*rate) if c.get("lifetime_budget") else ""
-        camp_map[c["id"]] = {"daily": daily, "lifetime": life, "objective": c.get("objective","")}
-    adset_map = {}
-    for s in sets or []:
-        daily = money0((float(s["daily_budget"])/divisor)*rate) if s.get("daily_budget") else ""
-        life  = money0((float(s["lifetime_budget"])/divisor)*rate) if s.get("lifetime_budget") else ""
-        adset_map[s["id"]] = {
-            "daily": daily, "lifetime": life, "campaign_id": s.get("campaign_id"),
-            "attrib": s.get("attribution_spec"), "opt_goal": s.get("optimization_goal")
-        }
-    return camp_map, adset_map
 
-def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
+def map_rows(ad_rows, account_name, rate):
     out = []
+
     for r in ad_rows or []:
-        s = adset_map.get(r.get("adset_id",""), {})
-        c = camp_map.get(r.get("campaign_id",""), {})
-        key = f"{r.get('adset_id','')}|{r.get('date_start','')}"
-        adset_spend_vnd = adset_spend_map.get(key, "")
-
         spend_vnd = money0(to_num(r.get("spend")) * rate)
-        clicks    = to_num(r.get("clicks"))
-        impr      = to_num(r.get("impressions"))
-        link      = to_num(r.get("inline_link_clicks"))
 
-        cpc_api  = r.get("cpc")
-        cpm_api  = r.get("cpm")
-
-        cpc_click_vnd = money0(to_num(cpc_api)*rate) if (cpc_api not in (None,"")) else (money0(spend_vnd/link) if link>0 else "")
-        cpc_all_vnd   = money0(spend_vnd/clicks) if clicks>0 else ""
-        cpm_vnd       = money0(to_num(cpm_api)*rate) if (cpm_api not in (None,"")) else (money0((spend_vnd/impr)*1000.0) if impr>0 else "")
-
-        ctr_api       = r.get("ctr")
-        ctr_all_pct   = to_num(ctr_api) if (ctr_api not in (None,"")) else (pct2(clicks, impr) or "")
-        ctr_click_pct = pct2(link, impr) or ""
-
-        # KẾT QUẢ = LEAD (ad-level, daily)
         lead_count, lead_key = extract_lead_count(r)
-        # Messaging starts (để hiển thị riêng)
         msg_started = extract_msg_started(r)
-        # CPA theo đúng key lead đã chọn
-        cpa_vnd = extract_cpa_vnd_for_key_priority(
-            r, rate, lead_key, LEAD_KEYS_PRIORITY, spend_vnd, lead_count
-        )
 
         out.append([
-            r.get("date_start",""),
-            r.get("account_id",""),
-            account_name or "",
-            r.get("campaign_id",""),
-            r.get("campaign_name",""),
-            camp_map.get(s.get("campaign_id",""),{}).get("daily","") if s.get("campaign_id") else c.get("daily",""),
-            spend_vnd or "",
-            msg_started or "",
-            lead_count or ""
+            r.get("date_start", ""),
+            r.get("account_id", ""),
+            account_name,
+            r.get("campaign_id", ""),
+            r.get("campaign_name", ""),
+            spend_vnd,
+            msg_started,
+            lead_count
         ])
+
     return out
 
 # ========= SHEET LOADING =========
@@ -556,15 +449,20 @@ def run_once():
         if cur!="VND" and (not rate or rate <= 0):
             emit_error_csv(f"Thiếu tỷ giá VND cho {cur} (cột G:H).")
             raise SystemExit(1)
-        divisor = minor_unit_divisor(cur)
+       
 
-        meta_sets = fetch_campaigns_and_adsets(act, token)
-        camp_map, adset_map = build_maps_vnd(meta_sets["campaigns"], meta_sets["adsets"], rate, divisor)
+        ads = fetch_insights_ad(
+    act,
+    cfg["since"],
+    cfg["until"],
+    token
+)
 
-        adset_spend = fetch_adset_spend_map_vnd(act, cfg["since"], cfg["until"], rate, token)
-        ads = fetch_insights_ad(act, cfg["since"], cfg["until"], token)
-
-        rows = map_rows(ads, adset_map, camp_map, adset_spend, meta["name"], rate)
+rows = map_rows(
+    ads,
+    meta["name"],
+    rate
+)
         all_rows.extend(rows)
 
     write_full_csv(all_rows)
