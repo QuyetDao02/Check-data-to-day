@@ -1200,105 +1200,126 @@ def write_full_csv(
 # MAIN
 # =========================================================
 def run_once():
+    cfg = load_config_or_fail()
 
-    config = load_config_or_fail()
-
-    token = os.environ.get(
-        "META_TOKEN"
-    )
-
+    token = os.environ.get("META_TOKEN")
     if not token:
-
-        emit_error_csv(
-            "Thiếu META_TOKEN."
-        )
-
+        emit_error_csv("Thiếu META_TOKEN trong workflow.")
         raise SystemExit(1)
 
-    all_rows = []
+    all_rows: List[List] = []
+    skipped_accounts = []
 
     for idx, act in enumerate(cfg["accounts"]):
 
-    if idx > 0:
-        time.sleep(ACCT_COOLDOWN)
+        if idx > 0:
+            time.sleep(ACCT_COOLDOWN)
 
-    log.info("Running Campaign Level: %s", act)
+        log.info("Running Campaign Level: %s", act)
 
-    try:
-        meta = fetch_account_meta(act, token)
+        try:
+            # =========================
+            # ACCOUNT INFO
+            # =========================
+            meta = fetch_account_meta(act, token)
 
-        cur = (meta.get("currency") or "VND").upper()
+            cur = (meta.get("currency") or "VND").upper()
 
-        rate = (
-            1.0
-            if cur == "VND"
-            else float(cfg["fx"].get(cur, 0))
-        )
+            if cur == "VND":
+                rate = 1.0
+            else:
+                rate = float(cfg["fx"].get(cur, 0))
 
-        if cur != "VND" and rate <= 0:
-            log.error(
-                "Missing FX rate for %s - skip %s",
-                cur,
-                act
+            if cur != "VND" and rate <= 0:
+                log.error(
+                    "Thiếu tỷ giá cho %s - bỏ qua %s",
+                    cur,
+                    act
+                )
+                skipped_accounts.append(act)
+                continue
+
+            # =========================
+            # CAMPAIGN LEVEL INSIGHTS
+            # =========================
+            ads = fetch_campaign_insights(
+                act,
+                cfg["since"],
+                cfg["until"],
+                token
             )
+
+            # =========================
+            # MAP DATA
+            # =========================
+            rows = map_rows(
+                ads,
+                meta.get("name", ""),
+                rate
+            )
+
+            all_rows.extend(rows)
+
+            log.info(
+                "Campaign Level done: %s | rows=%s",
+                act,
+                len(rows)
+            )
+
+        except RuntimeError as e:
+
+            if str(e) == "META_SKIP_ACCOUNT":
+                log.error(
+                    "Meta unavailable for %s - skip account",
+                    act
+                )
+
+                skipped_accounts.append(act)
+                continue
+
+            log.error(
+                "Account %s failed: %s",
+                act,
+                e
+            )
+
+            skipped_accounts.append(act)
             continue
 
-        ads = fetch_campaign_insights(
-            act,
-            cfg["since"],
-            cfg["until"],
-            token
-        )
+        except Exception as e:
 
-        rows = map_rows(
-            ads,
-            meta.get("name", ""),
-            rate
-        )
-
-        all_rows.extend(rows)
-
-        log.info(
-            "Campaign Level done: %s | rows=%s",
-            act,
-            len(rows)
-        )
-
-    except RuntimeError as e:
-
-        if str(e) == "META_SKIP_ACCOUNT":
-            log.error(
-                "Meta unavailable for %s. "
-                "Skip account and continue.",
-                act
+            log.exception(
+                "Unexpected error on account %s: %s",
+                act,
+                e
             )
+
+            skipped_accounts.append(act)
             continue
 
-        log.error(
-            "Account %s failed: %s",
-            act,
-            e
-        )
-        continue
+    # =========================
+    # WRITE CSV
+    # =========================
+    write_full_csv(all_rows)
 
-    except Exception as e:
-
-        log.exception(
-            "Unexpected error on account %s: %s",
-            act,
-            e
-        )
-        continue
-    write_full_csv(
-        all_rows
+    log.info(
+        "Finished. Rows=%s | Skipped accounts=%s",
+        len(all_rows),
+        len(skipped_accounts)
     )
+
+    if skipped_accounts:
+        log.warning(
+            "Skipped: %s",
+            ", ".join(skipped_accounts)
+        )
 
     print(
         json.dumps(
             {
                 "status": "done",
-                "level": "campaign",
-                "rows": len(all_rows)
+                "rows": len(all_rows),
+                "skipped_accounts": len(skipped_accounts)
             },
             ensure_ascii=False
         )
