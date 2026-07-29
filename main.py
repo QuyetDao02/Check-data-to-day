@@ -1,222 +1,586 @@
 # main.py
-import os, io, json, time, math, random, datetime, csv, logging
+import os
+import io
+import json
+import time
+import math
+import random
+import datetime
+import csv
+import logging
+import pathlib
 from typing import List, Tuple
-import requests, yaml, pathlib
 
-# ========= PATHS =========
-ROOT        = pathlib.Path(__file__).resolve().parent
+import requests
+import yaml
+
+
+# =========================================================
+# PATHS
+# =========================================================
+ROOT = pathlib.Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "config.yml"
-CSV_PATH    = ROOT / "data" / "latest.csv"
+CSV_PATH = ROOT / "data" / "latest.csv"
 
-# ========= CONFIG =========
+
+# =========================================================
+# CONFIG
+# =========================================================
 FB_API_VERSION = "v25.0"
+
 HEADERS_VN = [
-        "NGÀY BẮT ĐẦU",
+    "NGÀY BẮT ĐẦU",
     "ID TÀI KHOẢN",
     "TÊN TÀI KHOẢN",
     "ID CHIẾN DỊCH",
     "TÊN CHIẾN DỊCH",
     "CHI TIÊU CHIẾN DỊCH (VND)",
     "LƯỢT BẮT ĐẦU TRÒ CHUYỆN",
-    "KẾT QUẢ"
+    "KẾT QUẢ",
 ]
 
-# Nhịp & chống rate limit (có thể override bằng ENV)
-PACE_MS                 = int(float(os.environ.get("PACE_MS", 1500)))
-RATE_LIMIT_RETRIES      = int(float(os.environ.get("RATE_LIMIT_RETRIES", 8)))
-RATE_LIMIT_COOLDOWN     = int(float(os.environ.get("RATE_LIMIT_COOLDOWN", 120)))
-PAGE_BURST              = int(float(os.environ.get("PAGE_BURST", 25)))
-PAGE_BURST_SLEEP        = int(float(os.environ.get("PAGE_BURST_SLEEP", 5)))
-ACCT_COOLDOWN           = int(float(os.environ.get("ACCT_COOLDOWN", 8)))
-RATE_LIMIT_ERR          = "RATE_LIMIT"
-DEBUG                   = os.environ.get("DEBUG","0") == "1"
-REPORT_TIME             = (os.environ.get("REPORT_TIME") or "conversion").strip().lower()  # "conversion"|"impression"
+PACE_MS = int(float(os.environ.get("PACE_MS", 1500)))
+RATE_LIMIT_RETRIES = int(
+    float(os.environ.get("RATE_LIMIT_RETRIES", 8))
+)
+RATE_LIMIT_COOLDOWN = int(
+    float(os.environ.get("RATE_LIMIT_COOLDOWN", 120))
+)
+PAGE_BURST = int(float(os.environ.get("PAGE_BURST", 25)))
+PAGE_BURST_SLEEP = int(float(os.environ.get("PAGE_BURST_SLEEP", 5)))
+ACCT_COOLDOWN = int(float(os.environ.get("ACCT_COOLDOWN", 8)))
+
+RATE_LIMIT_ERR = "RATE_LIMIT"
+
+DEBUG = os.environ.get("DEBUG", "0") == "1"
+
+REPORT_TIME = (
+    os.environ.get("REPORT_TIME") or "conversion"
+).strip().lower()
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("fb-export")
+log = logging.getLogger("fb-campaign-export")
+
 _LAST_TS = 0
 
-# ========= ERROR CSV =========
+
+# =========================================================
+# ERROR CSV
+# =========================================================
 def emit_error_csv(msg: str):
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
-        f.write("ERROR\n")
-        f.write((msg or "").strip() + "\n")
 
-# ========= UTILS =========
+    with open(
+        CSV_PATH,
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as f:
+        writer = csv.writer(f)
+        writer.writerow(["ERROR"])
+        writer.writerow([(msg or "").strip()])
+
+
+# =========================================================
+# UTILS
+# =========================================================
 def _env_int(name: str, default: int) -> int:
-    v = os.environ.get(name)
-    if v is None: return default
-    s = str(v).strip()
-    if s == "":   return default
-    try:          return int(float(s))
-    except:       return default
+    value = os.environ.get(name)
+
+    if value is None:
+        return default
+
+    value = str(value).strip()
+
+    if not value:
+        return default
+
+    try:
+        return int(float(value))
+    except Exception:
+        return default
+
 
 def _apply_env_overrides():
-    global PACE_MS, RATE_LIMIT_RETRIES
-    PACE_MS            = _env_int("PACE_MS", PACE_MS)
-    RATE_LIMIT_RETRIES = _env_int("RATE_LIMIT_RETRIES", RATE_LIMIT_RETRIES)
+    global PACE_MS
+    global RATE_LIMIT_RETRIES
+
+    PACE_MS = _env_int("PACE_MS", PACE_MS)
+    RATE_LIMIT_RETRIES = _env_int(
+        "RATE_LIMIT_RETRIES",
+        RATE_LIMIT_RETRIES
+    )
+
 
 def pace():
     global _LAST_TS
+
     now = time.time() * 1000
-    wait = PACE_MS - (now - _LAST_TS) if _LAST_TS else 0
-    if wait > 0:
-        time.sleep(wait/1000.0)
+
+    if _LAST_TS:
+        wait = PACE_MS - (now - _LAST_TS)
+
+        if wait > 0:
+            time.sleep(wait / 1000)
+
     _LAST_TS = time.time() * 1000
 
-def to_num(v):
+
+def to_num(value):
     try:
-        n = float(v)
-        if math.isfinite(n): return n
-        return 0.0
-    except:
+        number = float(value)
+
+        if math.isfinite(number):
+            return number
+
         return 0.0
 
-def money0(v) -> int:
+    except Exception:
+        return 0.0
+
+
+def money0(value) -> int:
     try:
-        return int(round(float(v)))
-    except:
+        return int(round(float(value)))
+    except Exception:
         return 0
 
-def with_token(url: str, token: str) -> str:
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}access_token={requests.utils.quote(token)}"
 
-# ========= FB GETTERS =========
-def fb_get(url: str, token: str, try_count=0):
+def quote(value) -> str:
+    return requests.utils.quote(str(value))
+
+
+# =========================================================
+# FACEBOOK API
+# =========================================================
+def fb_get(
+    url: str,
+    token: str,
+    try_count: int = 0
+):
     pace()
-    MAX_TRIES = max(RATE_LIMIT_RETRIES, 3)
-    backoff = min(1.2*(1.8**try_count) + random.random()*0.7, 25.0)
-    r = requests.get(with_token(url, token), timeout=60)
-    code = r.status_code
+
+    max_tries = max(
+        RATE_LIMIT_RETRIES,
+        3
+    )
+
+    backoff = min(
+        1.2 * (1.8 ** try_count)
+        + random.random() * 0.7,
+        25.0
+    )
+
+    response = requests.get(
+        url,
+        params={"access_token": token},
+        timeout=60
+    )
+
+    code = response.status_code
+
     if 200 <= code < 300:
-        return r.json()
+        return response.json()
 
-    err_json = None
-    try: err_json = r.json()
-    except: pass
+    error_json = None
+
+    try:
+        error_json = response.json()
+    except Exception:
+        pass
+
     if DEBUG:
-        short = url.split("?")[0]
-        print(f"[FB_ERR] HTTP {code} @ {short}")
-        print("[FB_ERR_BODY]" if err_json else "[FB_ERR_TEXT]", (err_json or r.text[:500]))
+        print(
+            f"[FB_ERR] HTTP {code} @ "
+            f"{url.split('?')[0]}"
+        )
 
-    err = (err_json or {}).get("error", {})
+        print(
+            error_json
+            if error_json
+            else response.text[:500]
+        )
 
-    if code == 429 or str(err.get("code")) in {"4","613"} or err.get("is_transient"):
-        if try_count < MAX_TRIES:
-            time.sleep(backoff); return fb_get(url, token, try_count+1)
-        raise RuntimeError(RATE_LIMIT_ERR)
+    error = (error_json or {}).get(
+        "error",
+        {}
+    )
 
-    if (code == 400 and str(err.get("code"))=="17") or code >= 500:
-        if try_count < MAX_TRIES:
-            time.sleep(backoff); return fb_get(url, token, try_count+1)
-        raise RuntimeError(f"HTTP {code} after retries: {r.text}")
+    error_code = str(
+        error.get("code", "")
+    )
 
-    raise RuntimeError(f"HTTP {code}: {r.text}")
+    retryable = (
+        code == 429
+        or error_code in {"4", "613"}
+        or error.get("is_transient")
+    )
 
-def fb_get_safely(url: str, token: str):
+    if retryable:
+
+        if try_count < max_tries:
+            time.sleep(backoff)
+
+            return fb_get(
+                url,
+                token,
+                try_count + 1
+            )
+
+        raise RuntimeError(
+            RATE_LIMIT_ERR
+        )
+
+    server_error = (
+        (
+            code == 400
+            and error_code == "17"
+        )
+        or code >= 500
+    )
+
+    if server_error:
+
+        if try_count < max_tries:
+            time.sleep(backoff)
+
+            return fb_get(
+                url,
+                token,
+                try_count + 1
+            )
+
+        raise RuntimeError(
+            f"HTTP {code} after retries: "
+            f"{response.text}"
+        )
+
+    raise RuntimeError(
+        f"HTTP {code}: {response.text}"
+    )
+
+
+def fb_get_safely(
+    url: str,
+    token: str
+):
     while True:
+
         try:
-            return fb_get(url, token)
-        except RuntimeError as e:
-            if str(e) == RATE_LIMIT_ERR:
-                sleep_s = RATE_LIMIT_COOLDOWN + random.randint(3, 12)
-                if DEBUG: print(f"[COOLDOWN] rate-limit, sleep {sleep_s}s")
-                time.sleep(sleep_s)
+            return fb_get(
+                url,
+                token
+            )
+
+        except RuntimeError as error:
+
+            if str(error) == RATE_LIMIT_ERR:
+
+                sleep_seconds = (
+                    RATE_LIMIT_COOLDOWN
+                    + random.randint(3, 12)
+                )
+
+                if DEBUG:
+                    print(
+                        "[COOLDOWN] "
+                        f"sleep {sleep_seconds}s"
+                    )
+
+                time.sleep(
+                    sleep_seconds
+                )
+
                 continue
+
             raise
 
-def fb_paged(url_no_token: str, token: str) -> List[dict]:
-    out = []; url = url_no_token; guard = 0
+
+def fb_paged(
+    url: str,
+    token: str
+) -> List[dict]:
+
+    rows = []
+    page_count = 0
+
     while url:
-        j = fb_get_safely(url, token)
-        out.extend(j.get("data",[]) or [])
-        url = j.get("paging",{}).get("next")
-        guard += 1
-        if guard % PAGE_BURST == 0:
-            time.sleep(PAGE_BURST_SLEEP)
-        if guard > 10000: raise RuntimeError("Paging overflow.")
-    return out
 
-# ========= FETCHERS =========
-def fetch_account_meta(act_id: str, token: str) -> dict:
-    url = f"https://graph.facebook.com/{FB_API_VERSION}/{requests.utils.quote(act_id)}?fields=name,currency"
+        data = fb_get_safely(
+            url,
+            token
+        )
+
+        rows.extend(
+            data.get("data", [])
+            or []
+        )
+
+        url = (
+            data.get("paging", {})
+            .get("next")
+        )
+
+        page_count += 1
+
+        if (
+            page_count % PAGE_BURST
+            == 0
+        ):
+            time.sleep(
+                PAGE_BURST_SLEEP
+            )
+
+        if page_count > 10000:
+            raise RuntimeError(
+                "Paging overflow."
+            )
+
+    return rows
+
+
+# =========================================================
+# ACCOUNT
+# =========================================================
+def fetch_account_meta(
+    act_id: str,
+    token: str
+) -> dict:
+
+    url = (
+        f"https://graph.facebook.com/"
+        f"{FB_API_VERSION}/"
+        f"{quote(act_id)}"
+        "?fields=name,currency"
+    )
+
     try:
-        j = fb_get_safely(url, token)
-        return {"name": j.get("name",""), "currency": j.get("currency","VND")}
-    except Exception as e:
-        if str(e)==RATE_LIMIT_ERR: raise
-        return {"name":"","currency":"VND"}
 
-def fetch_insights_ad(act_id: str, since: str, until: str, token: str) -> List[dict]:
-    act = requests.utils.quote(act_id)
-    base = f"https://graph.facebook.com/{FB_API_VERSION}/{act}/insights"
+        data = fb_get_safely(
+            url,
+            token
+        )
 
+        return {
+            "name": data.get(
+                "name",
+                ""
+            ),
+            "currency": data.get(
+                "currency",
+                "VND"
+            )
+        }
+
+    except Exception as error:
+
+        if str(error) == RATE_LIMIT_ERR:
+            raise
+
+        return {
+            "name": "",
+            "currency": "VND"
+        }
+
+
+# =========================================================
+# CAMPAIGN INSIGHTS
+# =========================================================
+def fetch_campaign_insights(
+    act_id: str,
+    since: str,
+    until: str,
+    token: str
+) -> List[dict]:
+
+    act = quote(act_id)
+
+    base = (
+        f"https://graph.facebook.com/"
+        f"{FB_API_VERSION}/"
+        f"{act}/insights"
+    )
+
+    # Chỉ Campaign Level
+    base_fields = [
         "date_start",
-    "account_id",
-    "campaign_id",
-    "campaign_name",
-    "spend"= [
-        "date_start","account_id","campaign_id","campaign_name",
-        "adset_id","adset_name","ad_id","ad_name",
-        "impressions","reach","spend","clicks","inline_link_clicks",
-        "cpm","cpc","ctr"
+        "account_id",
+        "campaign_id",
+        "campaign_name",
+        "spend",
     ]
-    action_fields = ["actions","cost_per_action_type"]
+
+    action_fields = [
+        "actions",
+        "cost_per_action_type",
+    ]
 
     def build_url(mode: str) -> str:
-        fields = base_fields.copy()
-        params = {
-            "level":"campaign","limit":"500",
-            "time_range": json.dumps({"since":since,"until":until}),
-            "time_increment":"1",
-            "use_unified_attribution_setting":"true",
-        }
-        if REPORT_TIME in ("conversion","impression"):
-            params["action_report_time"] = REPORT_TIME
-        if mode in ("full","plain"):
-            fields += action_fields
-        params["fields"] = ",".join(fields)
-        q = "&".join([f"{k}={requests.utils.quote(str(v))}" for k,v in params.items()])
-        return f"{base}?{q}"
 
-    modes = ["full","plain","basic"]
-    data: List[dict] = []
+        fields = base_fields.copy()
+
+        params = {
+            "level": "campaign",
+            "limit": "500",
+            "time_range": json.dumps({
+                "since": since,
+                "until": until
+            }),
+            "time_increment": "1",
+            "use_unified_attribution_setting": "true",
+        }
+
+        if REPORT_TIME in (
+            "conversion",
+            "impression"
+        ):
+            params[
+                "action_report_time"
+            ] = REPORT_TIME
+
+        if mode in (
+            "full",
+            "plain"
+        ):
+            fields.extend(
+                action_fields
+            )
+
+        params["fields"] = ",".join(
+            fields
+        )
+
+        query = "&".join(
+            f"{key}={quote(value)}"
+            for key, value
+            in params.items()
+        )
+
+        return f"{base}?{query}"
+
+    modes = [
+        "full",
+        "plain",
+        "basic"
+    ]
+
+    result = []
 
     for mode in modes:
-        url = build_url(mode) if mode!="basic" else build_url("plain").replace(",".join(action_fields), "")
-        if DEBUG: print(f"[INSIGHTS] try mode={mode}")
 
-        out = []; guard = 0
+        if mode == "basic":
+
+            url = build_url(
+                "plain"
+            )
+
+            url = url.replace(
+                ",".join(action_fields),
+                ""
+            )
+
+        else:
+            url = build_url(
+                mode
+            )
+
+        if DEBUG:
+            print(
+                f"[INSIGHTS] "
+                f"try mode={mode}"
+            )
+
+        output = []
+        page_count = 0
+
         while url:
-            try:
-                j = fb_get_safely(url, token)
-            except RuntimeError as e:
-                msg = str(e)
-                if ("Invalid parameter" in msg) or ("\"code\":100" in msg) or ("error_subcode\":1504018" in msg):
-                    if DEBUG: print(f"[INSIGHTS] mode={mode} invalid -> fallback")
-                    out = []; url = None; break
-                raise
-            out.extend(j.get("data",[]) or [])
-            url = j.get("paging",{}).get("next")
-            guard += 1
-            if guard % PAGE_BURST == 0:
-                time.sleep(PAGE_BURST_SLEEP)
-            if guard > 10000: raise RuntimeError("Paging overflow.")
-        if out:
-            data = out
-            if DEBUG: print(f"[INSIGHTS] success mode={mode}, rows={len(data)}")
-            break
-    return data
 
-# ========= ACTION PICKERS (không cộng dồn) =========
+            try:
+
+                data = fb_get_safely(
+                    url,
+                    token
+                )
+
+            except RuntimeError as error:
+
+                message = str(error)
+
+                invalid_parameter = (
+                    "Invalid parameter"
+                    in message
+                    or '"code":100'
+                    in message
+                    or "error_subcode\":1504018"
+                    in message
+                )
+
+                if invalid_parameter:
+
+                    if DEBUG:
+                        print(
+                            f"[INSIGHTS] "
+                            f"mode={mode} "
+                            "invalid -> fallback"
+                        )
+
+                    output = []
+                    url = None
+                    break
+
+                raise
+
+            output.extend(
+                data.get("data", [])
+                or []
+            )
+
+            url = (
+                data.get("paging", {})
+                .get("next")
+            )
+
+            page_count += 1
+
+            if (
+                page_count % PAGE_BURST
+                == 0
+            ):
+                time.sleep(
+                    PAGE_BURST_SLEEP
+                )
+
+            if page_count > 10000:
+                raise RuntimeError(
+                    "Paging overflow."
+                )
+
+        if output:
+
+            result = output
+
+            if DEBUG:
+                print(
+                    f"[INSIGHTS] "
+                    f"success mode={mode}, "
+                    f"rows={len(result)}"
+                )
+
+            break
+
+    return result
+
+
+# =========================================================
+# ACTIONS
+# =========================================================
 LEAD_KEYS_PRIORITY = [
     "lead",
     "onsite_conversion.lead",
     "leadgen",
-    "onsite_conversion.lead_grouped"
+    "onsite_conversion.lead_grouped",
 ]
+
 
 MSG_KEYS_PRIORITY = [
     "messaging_conversations_started",
@@ -227,252 +591,757 @@ MSG_KEYS_PRIORITY = [
     "onsite_conversion.messaging_conversation_started_1d",
 ]
 
-def _actions_map(r: dict) -> dict:
-    out = {}
-    arr = r.get("actions")
-    if isinstance(arr, list):
-        for it in arr:
-            k = str(it.get("action_type","")).lower()
-            v = to_num(it.get("value"))
-            if k not in out:
-                out[k] = v
-    return out
 
-def _pick_first(map0: dict, keys: List[str]) -> Tuple[float, str]:
-    for k in keys:
-        if k in map0:
-            return map0[k], k
-    for k in keys:
-        for kk, vv in map0.items():
-            if k in kk:
-                return vv, kk
+def _actions_map(
+    row: dict
+) -> dict:
+
+    result = {}
+
+    actions = row.get(
+        "actions"
+    )
+
+    if not isinstance(
+        actions,
+        list
+    ):
+        return result
+
+    for item in actions:
+
+        action_type = str(
+            item.get(
+                "action_type",
+                ""
+            )
+        ).lower()
+
+        value = to_num(
+            item.get("value")
+        )
+
+        if action_type not in result:
+            result[
+                action_type
+            ] = value
+
+    return result
+
+
+def _pick_first(
+    action_map: dict,
+    keys: List[str]
+) -> Tuple[float, str]:
+
+    for key in keys:
+
+        if key in action_map:
+            return (
+                action_map[key],
+                key
+            )
+
+    for key in keys:
+
+        for actual_key, value in (
+            action_map.items()
+        ):
+
+            if key in actual_key:
+                return (
+                    value,
+                    actual_key
+                )
+
     return 0.0, ""
 
-def extract_lead_count(r: dict) -> Tuple[int, str]:
-    m = _actions_map(r)
-    v, k = _pick_first(m, LEAD_KEYS_PRIORITY)
-    return int(round(v)), k
 
-def extract_msg_started(r: dict) -> int:
-    m = _actions_map(r)
-    v, _ = _pick_first(m, MSG_KEYS_PRIORITY)
-    return int(round(v))
+def extract_lead_count(
+    row: dict
+) -> Tuple[int, str]:
 
-# ========= MAPS & ROWS =========
+    action_map = _actions_map(
+        row
+    )
 
-def map_rows(ad_rows, account_name, rate):
-    out = []
+    value, key = _pick_first(
+        action_map,
+        LEAD_KEYS_PRIORITY
+    )
 
-    for r in ad_rows or []:
-        spend_vnd = money0(to_num(r.get("spend")) * rate)
+    return (
+        int(round(value)),
+        key
+    )
 
-        lead_count, lead_key = extract_lead_count(r)
-        msg_started = extract_msg_started(r)
 
-        out.append([
-            r.get("date_start", ""),
-            r.get("account_id", ""),
-            account_name,
-            r.get("campaign_id", ""),
-            r.get("campaign_name", ""),
-            spend_vnd,
-            msg_started,
-            lead_count
+def extract_msg_started(
+    row: dict
+) -> int:
+
+    action_map = _actions_map(
+        row
+    )
+
+    value, _ = _pick_first(
+        action_map,
+        MSG_KEYS_PRIORITY
+    )
+
+    return int(
+        round(value)
+    )
+
+
+# =========================================================
+# MAP CAMPAIGN ROWS
+# =========================================================
+def map_rows(
+    campaign_rows,
+    account_name,
+    rate
+):
+
+    rows = []
+
+    for row in (
+        campaign_rows or []
+    ):
+
+        spend_vnd = money0(
+            to_num(
+                row.get("spend")
+            ) * rate
+        )
+
+        lead_count, _ = (
+            extract_lead_count(row)
+        )
+
+        msg_started = (
+            extract_msg_started(row)
+        )
+
+        rows.append([
+            row.get(
+                "date_start",
+                ""
+            ),
+            row.get(
+                "account_id",
+                ""
+            ),
+            account_name or "",
+            row.get(
+                "campaign_id",
+                ""
+            ),
+            row.get(
+                "campaign_name",
+                ""
+            ),
+            spend_vnd or "",
+            msg_started or "",
+            lead_count or "",
         ])
 
-    return out
+    return rows
 
-# ========= SHEET LOADING =========
-def to_ymd_any(val: str) -> str:
-    s = (val or "").strip()
-    if not s: return ""
-    s = s.split(" ")[0]
-    if "/" in s:
-        p = s.split("/")
-        if len(p)==3:
-            d, m, y = p[0], p[1], p[2]
-            return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
-    return s
 
-def _csv_rows_from_gsheet_csv(sheet_id: str, sheet_name: str=None, gid: str=None, a1_range: str=None):
+# =========================================================
+# GOOGLE SHEET
+# =========================================================
+def to_ymd_any(
+    value: str
+) -> str:
+
+    text = (
+        value or ""
+    ).strip()
+
+    if not text:
+        return ""
+
+    text = text.split(
+        " "
+    )[0]
+
+    if "/" in text:
+
+        parts = text.split("/")
+
+        if len(parts) == 3:
+
+            day, month, year = (
+                parts[0],
+                parts[1],
+                parts[2]
+            )
+
+            return (
+                f"{int(year):04d}-"
+                f"{int(month):02d}-"
+                f"{int(day):02d}"
+            )
+
+    return text
+
+
+def _csv_rows_from_gsheet_csv(
+    sheet_id: str,
+    sheet_name: str = None,
+    gid: str = None,
+    a1_range: str = None
+):
+
     urls = []
+
     if gid:
-        u = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-        if a1_range: u += f"&range={a1_range}"
-        urls.append(u)
-    base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv"
-    if sheet_name: base += f"&sheet={requests.utils.quote(sheet_name)}"
-    if a1_range:   base += f"&range={a1_range}"
+
+        url = (
+            f"https://docs.google.com/"
+            f"spreadsheets/d/{sheet_id}"
+            f"/export?format=csv"
+            f"&gid={gid}"
+        )
+
+        if a1_range:
+            url += (
+                f"&range={a1_range}"
+            )
+
+        urls.append(url)
+
+    base = (
+        f"https://docs.google.com/"
+        f"spreadsheets/d/{sheet_id}"
+        f"/gviz/tq?tqx=out:csv"
+    )
+
+    if sheet_name:
+        base += (
+            f"&sheet={quote(sheet_name)}"
+        )
+
+    if a1_range:
+        base += (
+            f"&range={a1_range}"
+        )
+
     urls.append(base)
 
-    last_err = None
-    for u in urls:
+    last_error = None
+
+    for url in urls:
+
         try:
-            r = requests.get(u, timeout=30); r.raise_for_status()
-            rows = list(csv.reader(io.StringIO(r.text)))
-            if rows: return rows
-        except Exception as e:
-            last_err = e
-            continue
-    if last_err: raise last_err
+
+            response = requests.get(
+                url,
+                timeout=30
+            )
+
+            response.raise_for_status()
+
+            rows = list(
+                csv.reader(
+                    io.StringIO(
+                        response.text
+                    )
+                )
+            )
+
+            if rows:
+                return rows
+
+        except Exception as error:
+            last_error = error
+
+    if last_error:
+        raise last_error
+
     return []
 
-def _clamp_dates(since: str, until: str) -> (str, str):
+
+def _clamp_dates(
+    since: str,
+    until: str
+):
+
     today = datetime.date.today()
-    s = datetime.date.fromisoformat(since)
-    u = datetime.date.fromisoformat(until)
-    if u > today: u = today
-    if s > u: s = u
-    return s.isoformat(), u.isoformat()
 
-def load_from_sheet_or_fail() -> dict:
-    sheet_id   = os.environ.get("SHEET_ID")
+    start = datetime.date.fromisoformat(
+        since
+    )
+
+    end = datetime.date.fromisoformat(
+        until
+    )
+
+    if end > today:
+        end = today
+
+    if start > end:
+        start = end
+
+    return (
+        start.isoformat(),
+        end.isoformat()
+    )
+
+
+# =========================================================
+# CONFIG FROM GOOGLE SHEET
+# =========================================================
+def load_from_sheet_or_fail():
+
+    sheet_id = os.environ.get(
+        "SHEET_ID"
+    )
+
     if not sheet_id:
-        emit_error_csv("Thiếu biến SHEET_ID."); raise SystemExit(1)
 
-    sheet_name = os.environ.get("API_SHEET_NAME","api")
-    sheet_gid  = os.environ.get("API_SHEET_GID")
+        emit_error_csv(
+            "Thiếu biến SHEET_ID."
+        )
 
-    d_vals = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="D2:D4")
-    vals = [(row[0].strip() if row and len(row)>=1 else "") for row in d_vals]
-    since_raw  = vals[0] if len(vals)>0 else ""
-    until_raw  = vals[1] if len(vals)>1 else ""
-    accounts_s = vals[2] if len(vals)>2 else ""
-
-    since = to_ymd_any(since_raw)
-    until = to_ymd_any(until_raw)
-    if not since or not until or not accounts_s:
-        if DEBUG: print("[SHEET DUMP D2:D4]", d_vals)
-        emit_error_csv("Thiếu cấu hình 'api': D2 (since), D3 (until), D4 (ad accounts).")
         raise SystemExit(1)
 
-    try: datetime.date.fromisoformat(since)
-    except: emit_error_csv("Sai định dạng 'since'"); raise SystemExit(1)
-    try: datetime.date.fromisoformat(until)
-    except: emit_error_csv("Sai định dạng 'until'"); raise SystemExit(1)
+    sheet_name = os.environ.get(
+        "API_SHEET_NAME",
+        "api"
+    )
 
-    since, until = _clamp_dates(since, until)
+    sheet_gid = os.environ.get(
+        "API_SHEET_GID"
+    )
 
-    accounts = [a.strip() for a in accounts_s.split(",") if a.strip()]
-    if not accounts:
-        emit_error_csv("D4 rỗng: liệt kê account, cách nhau dấu phẩy."); raise SystemExit(1)
-    accounts = [a if a.startswith("act_") else f"act_{a}" for a in accounts]
+    d_values = (
+        _csv_rows_from_gsheet_csv(
+            sheet_id,
+            sheet_name=sheet_name,
+            gid=sheet_gid,
+            a1_range="D2:D4"
+        )
+    )
 
-    fx_rows = _csv_rows_from_gsheet_csv(sheet_id, sheet_name=sheet_name, gid=sheet_gid, a1_range="G2:H")
+    values = [
+        (
+            row[0].strip()
+            if row
+            and len(row) >= 1
+            else ""
+        )
+        for row in d_values
+    ]
+
+    since_raw = (
+        values[0]
+        if len(values) > 0
+        else ""
+    )
+
+    until_raw = (
+        values[1]
+        if len(values) > 1
+        else ""
+    )
+
+    accounts_text = (
+        values[2]
+        if len(values) > 2
+        else ""
+    )
+
+    since = to_ymd_any(
+        since_raw
+    )
+
+    until = to_ymd_any(
+        until_raw
+    )
+
+    if (
+        not since
+        or not until
+        or not accounts_text
+    ):
+
+        emit_error_csv(
+            "Thiếu cấu hình api!D2, "
+            "D3 hoặc D4."
+        )
+
+        raise SystemExit(1)
+
+    try:
+        datetime.date.fromisoformat(
+            since
+        )
+    except Exception:
+
+        emit_error_csv(
+            "Sai định dạng since."
+        )
+
+        raise SystemExit(1)
+
+    try:
+        datetime.date.fromisoformat(
+            until
+        )
+    except Exception:
+
+        emit_error_csv(
+            "Sai định dạng until."
+        )
+
+        raise SystemExit(1)
+
+    since, until = _clamp_dates(
+        since,
+        until
+    )
+
+    accounts = [
+        account.strip()
+        for account in accounts_text.split(",")
+        if account.strip()
+    ]
+
+    accounts = [
+        account
+        if account.startswith("act_")
+        else f"act_{account}"
+        for account in accounts
+    ]
+
+    fx_rows = (
+        _csv_rows_from_gsheet_csv(
+            sheet_id,
+            sheet_name=sheet_name,
+            gid=sheet_gid,
+            a1_range="G2:H"
+        )
+    )
+
     fx = {}
-    for r in fx_rows:
-        if len(r)>=2 and r[0] and r[1]:
-            try:
-                cur = str(r[0]).strip().upper()
-                rate= float(str(r[1]).strip())
-                if rate>0: fx[cur]=rate
-            except: pass
-    if "VND" not in fx: fx["VND"] = 1.0
 
-    if DEBUG: print("[CONFIG] since:", since, "until:", until, "accounts:", accounts)
+    for row in fx_rows:
+
+        if (
+            len(row) >= 2
+            and row[0]
+            and row[1]
+        ):
+
+            try:
+
+                currency = (
+                    str(row[0])
+                    .strip()
+                    .upper()
+                )
+
+                rate = float(
+                    str(row[1]).strip()
+                )
+
+                if rate > 0:
+                    fx[currency] = rate
+
+            except Exception:
+                pass
+
+    if "VND" not in fx:
+        fx["VND"] = 1.0
 
     _apply_env_overrides()
-    return {"since": since, "until": until, "accounts": accounts, "fx": fx}
 
-def load_from_config_file_or_fail() -> dict:
+    return {
+        "since": since,
+        "until": until,
+        "accounts": accounts,
+        "fx": fx,
+    }
+
+
+# =========================================================
+# CONFIG FROM YAML
+# =========================================================
+def load_from_config_file_or_fail():
+
     if not CONFIG_PATH.exists():
-        emit_error_csv("Thiếu SHEET_ID hoặc config/config.yml.")
+
+        emit_error_csv(
+            "Thiếu SHEET_ID hoặc "
+            "config/config.yml."
+        )
+
         raise SystemExit(1)
+
     try:
-        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception as e:
-        emit_error_csv(f"Lỗi đọc config.yml: {e}")
+
+        config = yaml.safe_load(
+            CONFIG_PATH.read_text(
+                encoding="utf-8"
+            )
+        ) or {}
+
+    except Exception as error:
+
+        emit_error_csv(
+            f"Lỗi đọc config.yml: {error}"
+        )
+
         raise SystemExit(1)
 
     missing = []
-    if not cfg.get("since"):    missing.append("since")
-    if not cfg.get("until"):    missing.append("until")
-    if not cfg.get("accounts"): missing.append("accounts")
+
+    if not config.get("since"):
+        missing.append("since")
+
+    if not config.get("until"):
+        missing.append("until")
+
+    if not config.get("accounts"):
+        missing.append("accounts")
+
     if missing:
-        emit_error_csv("Thiếu cấu hình trong config.yml: " + ", ".join(missing))
+
+        emit_error_csv(
+            "Thiếu cấu hình: "
+            + ", ".join(missing)
+        )
+
         raise SystemExit(1)
 
-    since = to_ymd_any(cfg["since"]); until = to_ymd_any(cfg["until"])
-    try: datetime.date.fromisoformat(since)
-    except: emit_error_csv("Sai 'since' trong config.yml"); raise SystemExit(1)
-    try: datetime.date.fromisoformat(until)
-    except: emit_error_csv("Sai 'until' trong config.yml"); raise SystemExit(1)
+    since = to_ymd_any(
+        config["since"]
+    )
 
-    since, until = _clamp_dates(since, until)
+    until = to_ymd_any(
+        config["until"]
+    )
 
-    accounts = [str(a).strip() for a in cfg["accounts"] if str(a).strip()]
-    if not accounts:
-        emit_error_csv("Danh sách accounts rỗng trong config.yml"); raise SystemExit(1)
-    accounts = [a if a.startswith("act_") else f"act_{a}" for a in accounts]
+    since, until = _clamp_dates(
+        since,
+        until
+    )
 
-    fx_raw = cfg.get("fx") or {}
-    try:
-        fx = {str(k).upper(): float(v) for k,v in fx_raw.items()}
-    except Exception:
-        emit_error_csv("Sai fx trong config.yml"); raise SystemExit(1)
-    if "VND" not in fx: fx["VND"] = 1.0
+    accounts = [
+        str(account).strip()
+        for account in config["accounts"]
+        if str(account).strip()
+    ]
 
-    if DEBUG: print("[CONFIG] since:", since, "until:", until, "accounts:", accounts)
+    accounts = [
+        account
+        if account.startswith("act_")
+        else f"act_{account}"
+        for account in accounts
+    ]
+
+    fx = {
+        "VND": 1.0
+    }
+
+    for currency, value in (
+        config.get("fx") or {}
+    ).items():
+
+        try:
+
+            rate = float(value)
+
+            if rate > 0:
+                fx[
+                    str(currency).upper()
+                ] = rate
+
+        except Exception:
+            pass
 
     _apply_env_overrides()
-    return {"since": since, "until": until, "accounts": accounts, "fx": fx}
 
-def load_config_or_fail() -> dict:
-    if os.environ.get("SHEET_ID"):
+    return {
+        "since": since,
+        "until": until,
+        "accounts": accounts,
+        "fx": fx,
+    }
+
+
+def load_config_or_fail():
+
+    if os.environ.get(
+        "SHEET_ID"
+    ):
         return load_from_sheet_or_fail()
+
     return load_from_config_file_or_fail()
 
-# ========= MAIN =========
-def write_full_csv(rows: List[List]):
-    CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(HEADERS_VN)
+
+# =========================================================
+# CSV
+# =========================================================
+def write_full_csv(
+    rows: List[List]
+):
+
+    CSV_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    with open(
+        CSV_PATH,
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as file:
+
+        writer = csv.writer(file)
+
+        writer.writerow(
+            HEADERS_VN
+        )
+
         if rows:
-            w.writerows(rows)
+            writer.writerows(
+                rows
+            )
 
+
+# =========================================================
+# MAIN
+# =========================================================
 def run_once():
-    cfg = load_config_or_fail()
 
-    token = os.environ.get("META_TOKEN")
+    config = load_config_or_fail()
+
+    token = os.environ.get(
+        "META_TOKEN"
+    )
+
     if not token:
-        emit_error_csv("Thiếu META_TOKEN trong workflow (sync.yml).")
+
+        emit_error_csv(
+            "Thiếu META_TOKEN."
+        )
+
         raise SystemExit(1)
 
-    all_rows: List[List] = []
-    for idx, act in enumerate(cfg["accounts"]):
-        if idx > 0:
-            time.sleep(ACCT_COOLDOWN)
-        meta = fetch_account_meta(act, token)
-        cur  = (meta.get("currency") or "VND").upper()
-        rate = 1.0 if cur=="VND" else float(cfg["fx"].get(cur, 0))
-        if cur!="VND" and (not rate or rate <= 0):
-            emit_error_csv(f"Thiếu tỷ giá VND cho {cur} (cột G:H).")
+    all_rows = []
+
+    for index, act_id in enumerate(
+        config["accounts"]
+    ):
+
+        if index > 0:
+            time.sleep(
+                ACCT_COOLDOWN
+            )
+
+        log.info(
+            "Running Campaign Level: %s",
+            act_id
+        )
+
+        meta = fetch_account_meta(
+            act_id,
+            token
+        )
+
+        currency = (
+            meta.get("currency")
+            or "VND"
+        ).upper()
+
+        if currency == "VND":
+
+            rate = 1.0
+
+        else:
+
+            rate = float(
+                config["fx"].get(
+                    currency,
+                    0
+                )
+            )
+
+        if (
+            currency != "VND"
+            and (
+                not rate
+                or rate <= 0
+            )
+        ):
+
+            emit_error_csv(
+                f"Thiếu tỷ giá "
+                f"VND cho {currency}."
+            )
+
             raise SystemExit(1)
-       
 
-        ads = fetch_insights_ad(
-    act,
-    cfg["since"],
-    cfg["until"],
-    token
-)
+        # =================================================
+        # CHỈ LẤY CAMPAIGN LEVEL
+        # =================================================
+        campaign_rows = (
+            fetch_campaign_insights(
+                act_id,
+                config["since"],
+                config["until"],
+                token
+            )
+        )
 
-rows = map_rows(
-    ads,
-    meta["name"],
-    rate
-)
-        all_rows.extend(rows)
+        rows = map_rows(
+            campaign_rows,
+            meta["name"],
+            rate
+        )
 
-    write_full_csv(all_rows)
-    print(json.dumps({"status":"done","rows":len(all_rows)}, ensure_ascii=False))
+        all_rows.extend(
+            rows
+        )
 
+    write_full_csv(
+        all_rows
+    )
+
+    print(
+        json.dumps(
+            {
+                "status": "done",
+                "level": "campaign",
+                "rows": len(all_rows)
+            },
+            ensure_ascii=False
+        )
+    )
+
+
+# =========================================================
+# START
+# =========================================================
 if __name__ == "__main__":
+
     try:
+
         run_once()
+
     except SystemExit:
+
         raise
-    except Exception as e:
-        emit_error_csv(f"Lỗi không xác định: {e}")
+
+    except Exception as error:
+
+        emit_error_csv(
+            f"Lỗi không xác định: {error}"
+        )
+
         raise
