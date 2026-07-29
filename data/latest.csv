@@ -1,2 +1,2 @@
 ERROR
-Lỗi không xác định: name 'with_token' is not defined
+Lỗi không xác định: Meta API vẫn không khả dụng sau nhiều lần retry/cooldown.
