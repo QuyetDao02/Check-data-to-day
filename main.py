@@ -11,13 +11,15 @@ CSV_PATH    = ROOT / "data" / "latest.csv"
 # ========= CONFIG =========
 FB_API_VERSION = "v20.0"
 HEADERS_VN = [
-    "NGÀY BẮT ĐẦU","ID TÀI KHOẢN","TÊN TÀI KHOẢN",
-    "ID CHIẾN DỊCH","TÊN CHIẾN DỊCH","NGÂN SÁCH CHIẾN DỊCH (VND)",
-    "ID NHÓM QUẢNG CÁO","TÊN NHÓM QUẢNG CÁO","NGÂN SÁCH NHÓM QUẢNG CÁO (VND)","CHI TIÊU NHÓM QUẢNG CÁO (VND)",
-    "TÊN QUẢNG CÁO","LƯỢT BẮT ĐẦU TRÒ CHUYỆN","KẾT QUẢ","CHI PHÍ/MỖI KẾT QUẢ (VND)",
-    "CHI TIÊU QUẢNG CÁO (VND)","CPC CLICK (QC) (VND)","CPC TẤT CẢ (QC) (VND)",
-    "CTR CLICK (QC) (%)","CTR TẤT CẢ (QC) (%)","CPM (QC) (VND)",
-    "LƯỢT HIỂN THỊ (QC)","NGƯỜI TIẾP CẬN (QC)"
+    "NGÀY BẮT ĐẦU",
+    "ID TÀI KHOẢN",
+    "TÊN TÀI KHOẢN",
+    "ID CHIẾN DỊCH",
+    "TÊN CHIẾN DỊCH",
+    "NGÂN SÁCH CHIẾN DỊCH (VND)",
+    "CHI TIÊU NHÓM CHIẾN DỊCH (VND)",
+    "LƯỢT BẮT ĐẦU TRÒ CHUYỆN",
+    "KẾT QUẢ"
 ]
 
 # Nhịp & chống rate limit (có thể override bằng ENV)
@@ -378,25 +380,12 @@ def map_rows(ad_rows, adset_map, camp_map, adset_spend_map, account_name, rate):
             r.get("date_start",""),
             r.get("account_id",""),
             account_name or "",
-            r.get("campaign_id",""),                  # NEW: ID CHIẾN DỊCH
+            r.get("campaign_id",""),
             r.get("campaign_name",""),
             camp_map.get(s.get("campaign_id",""),{}).get("daily","") if s.get("campaign_id") else c.get("daily",""),
-            r.get("adset_id",""),                     # NEW: ID NHÓM QUẢNG CÁO
-            r.get("adset_name",""),
-            s.get("daily",""),
             adset_spend_vnd or "",
-            r.get("ad_name",""),
             msg_started or "",
-            lead_count or "",
-            cpa_vnd or "",
-            spend_vnd or "",
-            cpc_click_vnd or "",
-            cpc_all_vnd or "",
-            fmt_pct(ctr_click_pct),
-            fmt_pct(ctr_all_pct),
-            cpm_vnd or "",
-            impr or "",
-            r.get("reach","") or ""
+            lead_count or ""
         ])
     return out
 
