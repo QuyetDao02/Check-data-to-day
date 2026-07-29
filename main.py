@@ -149,7 +149,10 @@ def money0(value) -> int:
 def quote(value) -> str:
     return requests.utils.quote(str(value))
 
-
+def with_token(url: str, token: str) -> str:
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}access_token={requests.utils.quote(token)}"
+    
 # =========================================================
 # FACEBOOK API
 # =========================================================
