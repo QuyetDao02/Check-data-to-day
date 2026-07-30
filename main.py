@@ -35,8 +35,8 @@ HEADERS_VN = [
     "ID CHIẾN DỊCH",
     "TÊN CHIẾN DỊCH",
     "CHI TIÊU CHIẾN DỊCH (VND)",
-    "LƯỢT BẮT ĐẦU TRÒ CHUYỆN",
-    "KẾT QUẢ",
+    "SỐ MESS",
+    "SỐ LEAD"
 ]
 
 PACE_MS = int(float(os.environ.get("PACE_MS", 1500)))
@@ -679,56 +679,33 @@ def extract_msg_started(
 # =========================================================
 # MAP CAMPAIGN ROWS
 # =========================================================
-def map_rows(
-    campaign_rows,
-    account_name,
-    rate
-):
+def map_rows(ad_rows, account_name, rate):
+    out = []
 
-    rows = []
-
-    for row in (
-        campaign_rows or []
-    ):
+    for r in ad_rows or []:
 
         spend_vnd = money0(
-            to_num(
-                row.get("spend")
-            ) * rate
+            to_num(r.get("spend")) * rate
         )
 
-        lead_count, _ = (
-            extract_lead_count(row)
-        )
+        # Số lead
+        lead_count, _ = extract_lead_count(r)
 
-        msg_started = (
-            extract_msg_started(row)
-        )
+        # Số mess
+        msg_started = extract_msg_started(r)
 
-        rows.append([
-            row.get(
-                "date_start",
-                ""
-            ),
-            row.get(
-                "account_id",
-                ""
-            ),
+        out.append([
+            r.get("date_start", ""),
+            r.get("account_id", ""),
             account_name or "",
-            row.get(
-                "campaign_id",
-                ""
-            ),
-            row.get(
-                "campaign_name",
-                ""
-            ),
-            spend_vnd or "",
-            msg_started or "",
-            lead_count or "",
+            r.get("campaign_id", ""),
+            r.get("campaign_name", ""),
+            spend_vnd,
+            msg_started,
+            lead_count
         ])
 
-    return rows
+    return out
 
 
 # =========================================================
