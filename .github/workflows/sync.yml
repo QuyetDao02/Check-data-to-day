@@ -3,7 +3,7 @@ name: FB CSV Export (no GCP)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "7,37 * * * *"
 
 permissions:
   contents: write
@@ -12,12 +12,15 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
+
     env:
       SHEET_ID: 1jkdkGG2A8JS2GE728CwvkeVRFNXG7-28TN9GbXo1SYY
       API_SHEET_NAME: api
       API_SHEET_GID: "1875921302"
-      META_TOKEN: "EAATnZA0YVyJoBSHoUQOcOZCl7S5Eo1eZCUg6cDe0zLpzXdGCzG4NuiWBl0YU2ECutuWCn9nzEv2DyF0Gc0AA6KPFxvFGbJuZCx1oSxC2zGAFVZCyvmzivaozdOFWlLTwhyxNTUdHD8XNSpcjTEc5cyuGxM5fZBiwJVlTQiZBZA9LtMSpyKZC7JkvZCDOt8rm1c"
-      DEBUG: "0"   # đổi "1" nếu cần soi log cấu hình/ lỗi FB
+
+      META_TOKEN: 'EAATnZA0YVyJoBSHoUQOcOZCl7S5Eo1eZCUg6cDe0zLpzXdGCzG4NuiWBl0YU2ECutuWCn9nzEv2DyF0Gc0AA6KPFxvFGbJuZCx1oSxC2zGAFVZCyvmzivaozdOFWlLTwhyxNTUdHD8XNSpcjTEc5cyuGxM5fZBiwJVlTQiZBZA9LtMSpyKZC7JkvZCDOt8rm1c'
+
+      DEBUG: "0"
 
     steps:
       - uses: actions/checkout@v4
@@ -31,8 +34,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Tuỳ chọn: soi nhanh CSV từ Sheet
-      - name: Quick check Google Sheet CSV (optional)
+      - name: Quick check Google Sheet CSV
         if: env.DEBUG == '1'
         run: |
           echo "D2:D4 ->"
@@ -45,10 +47,10 @@ jobs:
       - name: Run exporter
         run: python -u main.py
 
-      - name: Commit CSV (even on failure)
+      - name: Commit CSV
         if: always()
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/latest.csv || true
           git commit -m "Update CSV (${GITHUB_RUN_ID})" || echo "No changes"
