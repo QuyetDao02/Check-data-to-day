@@ -265,7 +265,7 @@ def fetch_account_meta(act_id: str, token: str) -> dict:
 
         log.warning("Không lấy được thông tin tài khoản %s: %s", act_id, error)
         return {"name": "", "currency": "VND"}
-            def fetch_campaign_insights(
+def fetch_campaign_insights(
     act_id: str,
     since: str,
     until: str,
@@ -441,7 +441,7 @@ def map_rows(ad_rows, account_name, rate):
         ])
 
     return output
-        def to_ymd_any(value: str) -> str:
+def to_ymd_any(value: str) -> str:
     text = (value or "").strip()
 
     if not text:
