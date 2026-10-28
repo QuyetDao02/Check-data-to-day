@@ -1,4 +1,4 @@
-```yaml
+
 name: FB CSV Export (no GCP)
 
 on:
@@ -111,4 +111,4 @@ jobs:
           path: data/latest.csv
           if-no-files-found: warn
           retention-days: 7
-```
+
