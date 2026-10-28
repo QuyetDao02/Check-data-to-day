@@ -1,3 +1,4 @@
+```yaml
 name: FB CSV Export (no GCP)
 
 on:
@@ -9,55 +10,105 @@ permissions:
   contents: write
   actions: read
 
+concurrency:
+  group: fb-csv-export
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     env:
+      # Google Sheets
       SHEET_ID: 1jkdkGG2A8JS2GE728CwvkeVRFNXG7-28TN9GbXo1SYY
       API_SHEET_NAME: api
       API_SHEET_GID: "1875921302"
 
-      META_TOKEN: 'EAATnZA0YVyJoBSuavJCZCnz4V8NKPPzZAYILjy6GDwGkFAAozHKdGTSVRXR7Y3w8NB1gZBBprOH2sFlJL9c8Jwtw4lpZAJR8M06s8zaE7H7KbfJTQYrmZBVaA1CZAMvmCa1Weh3M0WaIxHZBDZBq2ecclpgN4kQziBeukBkWXzWELnjZBmkVTPYqVUWZAAUBqresFZA6'
+      # Meta Access Token: lưu trong GitHub Secrets
+      META_TOKEN: ${{ secrets.META_TOKEN }}
+
+      # Chế độ debug
       DEBUG: "0"
 
-    steps:
-      - uses: actions/checkout@v4
+      # Tối ưu tốc độ Meta API
+      PACE_MS: "200"
+      RATE_LIMIT_RETRIES: "5"
+      RATE_LIMIT_COOLDOWN: "45"
+      PAGE_BURST: "100"
+      PAGE_BURST_SLEEP: "1"
+      ACCT_COOLDOWN: "1"
 
-      - uses: actions/setup-python@v5
+    steps:
+      # 1. Lấy mã nguồn
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Cài Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
 
-      - name: Install deps
+      # 3. Cài thư viện
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --disable-pip-version-check -r requirements.txt
 
+      # 4. Kiểm tra cấu hình Google Sheets khi DEBUG=1
       - name: Quick check Google Sheet CSV
         if: env.DEBUG == '1'
         run: |
-          echo "D2:D4 ->"
-          curl -s "https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${API_SHEET_NAME}&range=D2:D4" || true
+          set -e
+
+          echo "Checking D2:D4..."
+          curl -fsSL --max-time 20 \
+            "https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${API_SHEET_NAME}&range=D2:D4"
+
           echo
-          echo "G2:H ->"
-          curl -s "https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${API_SHEET_NAME}&range=G2:H" || true
+          echo "Checking G2:H..."
+          curl -fsSL --max-time 20 \
+            "https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${API_SHEET_NAME}&range=G2:H"
+
           echo
 
-      - name: Run exporter
+      # 5. Chạy chương trình xuất dữ liệu
+      - name: Run Facebook Ads exporter
         run: python -u main.py
 
+      # 6. Kiểm tra file CSV
+      - name: Validate CSV output
+        if: success()
+        run: |
+          test -s data/latest.csv
+          echo "CSV file exists."
+          wc -l data/latest.csv
+
+      # 7. Commit CSV lên GitHub
       - name: Commit CSV
-        if: always()
+        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/latest.csv || true
-          git commit -m "Update CSV (${GITHUB_RUN_ID})" || echo "No changes"
-          git push || echo "No changes to push"
 
+          git add data/latest.csv
+
+          if git diff --cached --quiet; then
+            echo "CSV unchanged; no commit needed."
+          else
+            git commit -m "Update CSV (${GITHUB_RUN_ID})"
+            git push
+          fi
+
+      # 8. Lưu CSV làm artifact
       - name: Upload CSV artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: latest.csv
+          name: latest-csv-${{ github.run_number }}
           path: data/latest.csv
+          if-no-files-found: warn
+          retention-days: 7
+```
