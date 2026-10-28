@@ -1,4 +1,8 @@
 # CSV
+from pathlib import Path
+from typing import List
+
+rows: List[List] = []
 # =========================================================
 def write_full_csv(
     rows: List[List]
