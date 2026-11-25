@@ -31,16 +31,16 @@ HEADERS_VN = [
     "SỐ LEAD"
 ]
 
-PACE_MS = int(float(os.environ.get("PACE_MS", 200)))
+PACE_MS = int(float(os.environ.get("PACE_MS", 50)))
 RATE_LIMIT_RETRIES = int(
     float(os.environ.get("RATE_LIMIT_RETRIES", 4))
 )
 RATE_LIMIT_COOLDOWN = int(
     float(os.environ.get("RATE_LIMIT_COOLDOWN", 45))
 )
-PAGE_BURST = int(float(os.environ.get("PAGE_BURST", 100)))
-PAGE_BURST_SLEEP = int(float(os.environ.get("PAGE_BURST_SLEEP", 1)))
-ACCT_COOLDOWN = int(float(os.environ.get("ACCT_COOLDOWN", 1)))
+PAGE_BURST = int(float(os.environ.get("PAGE_BURST", 500)))
+PAGE_BURST_SLEEP = int(float(os.environ.get("PAGE_BURST_SLEEP", 0)))
+ACCT_COOLDOWN = int(float(os.environ.get("ACCT_COOLDOWN", 0)))
 
 RATE_LIMIT_ERR = "RATE_LIMIT"
 DEBUG = os.environ.get("DEBUG", "0") == "1"
@@ -259,12 +259,10 @@ def fetch_account_meta(act_id: str, token: str) -> dict:
             "name": data.get("name", ""),
             "currency": data.get("currency", "VND")
         }
-    except Exception as error:
-        if str(error) == RATE_LIMIT_ERR:
-            raise
-
-        log.warning("Không lấy được thông tin tài khoản %s: %s", act_id, error)
-        return {"name": "", "currency": "VND"}
+    except Exception:
+        # Không giả định VND khi không đọc được currency:
+        # để lỗi nổi lên, tránh quy đổi chi tiêu sai.
+        raise
 def fetch_campaign_insights(
     act_id: str,
     since: str,
@@ -279,7 +277,7 @@ def fetch_campaign_insights(
         "date_start", "account_id", "campaign_id",
         "campaign_name", "spend"
     ]
-    action_fields = ["actions", "cost_per_action_type"]
+    action_fields = ["actions"]
 
     def build_url(include_actions: bool) -> str:
         fields = base_fields + (
@@ -288,7 +286,7 @@ def fetch_campaign_insights(
 
         params = {
             "level": "campaign",
-            "limit": "500",
+            "limit": "5000",
             "time_range": json.dumps({
                 "since": since,
                 "until": until
